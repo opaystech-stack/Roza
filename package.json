@@ -1,0 +1,33 @@
+{
+  "name": "roza-agent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Roza — virtual Co-founder/CTO/COO agent (Phase 1). Isolated Dockerized Node.js service.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "oxlint"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.13.2",
+    "@types/node-cron": "^3.0.11",
+    "fast-check": "^3.23.2",
+    "oxlint": "^1.69.0",
+    "tsx": "^4.22.4",
+    "typescript": "~6.0.2",
+    "vitest": "^3.2.4"
+  }
+}

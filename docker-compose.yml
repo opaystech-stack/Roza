@@ -1,0 +1,47 @@
+# ==========================================
+# docker-compose.yml — Roza Agent (optional local run)
+#
+# Convenience for running Roza locally / outside Dokploy. Mounts ./data as a
+# durable volume (roza_mind.sqlite lives there) and injects configuration via
+# ${VAR} interpolation from the shell environment or a sibling `.env` file.
+#
+# NEVER hardcode secret values here. Provide them via a local `.env` file
+# (copied from `.env.example`) or your shell environment.
+#
+# The variable names below are exactly what src/config.ts reads at startup.
+# ==========================================
+
+services:
+  roza-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: roza-agent:latest
+    container_name: roza-agent
+    restart: unless-stopped
+    environment:
+      # --- Required secrets (startup aborts if missing/empty/whitespace) ---
+      ROZA_PRIVATE_KEY: ${ROZA_PRIVATE_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+
+      # --- Optional: OpenRouter model (default: openai/gpt-4o-mini) ---
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+
+      # --- Optional: IANA timezone for Active_Window + timestamps ---
+      #     (default: Africa/Kinshasa)
+      ROZA_TIMEZONE: ${ROZA_TIMEZONE:-}
+
+      # --- Optional: Active_Window bounds, 24-hour HH:MM ---
+      #     (defaults: 07:00 / 22:00)
+      ACTIVE_WINDOW_START: ${ACTIVE_WINDOW_START:-}
+      ACTIVE_WINDOW_END: ${ACTIVE_WINDOW_END:-}
+
+      # --- Optional: durable data directory (default: /app/data) ---
+      #     Keep aligned with the volume mount target below.
+      ROZA_DATA_DIR: ${ROZA_DATA_DIR:-/app/data}
+
+      # --- Optional: journal encryption key version label (default: v1) ---
+      ROZA_KEY_VERSION: ${ROZA_KEY_VERSION:-}
+    volumes:
+      # Durable volume: persists roza_mind.sqlite across container restarts.
+      - ./data:/app/data

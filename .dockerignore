@@ -1,0 +1,25 @@
+# Dependencies (reinstalled inside the image from the lockfile)
+node_modules
+
+# Build output (recompiled inside the image)
+dist
+*.tsbuildinfo
+
+# Durable data and SQLite databases (mounted as a volume at runtime)
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+
+# Environment files (secrets injected at runtime, never baked into the image)
+.env
+.env.local
+.env.*.local
+
+# Version control and tooling metadata
+.git
+.gitignore
+.kiro
+
+# Logs and OS cruft
+*.log
+.DS_Store

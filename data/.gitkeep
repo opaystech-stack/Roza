@@ -1,0 +1,3 @@
+# This directory is the durable volume mount for Roza's persistent data.
+# roza_mind.sqlite is created here at runtime. Keep this file so the empty
+# directory is tracked in version control; the database itself is gitignored.
