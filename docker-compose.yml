@@ -1,7 +1,7 @@
 # ==========================================
-# docker-compose.yml — Roza Agent (Phase 3: multi-service voice/telephony)
+# docker-compose.yml — Roza Agent (Phase 4: avatar video & live streaming)
 #
-# Convenience for running Roza locally / outside Dokploy. Defines two services
+# Convenience for running Roza locally / outside Dokploy. Defines the services
 # on a shared internal compose network:
 #
 #   * roza-agent — the Node.js / TypeScript Cognitive_Engine (single isolated
@@ -12,13 +12,46 @@
 #     code controls it over the ARI HTTP/WebSocket control plane and bridges
 #     real-time audio over AudioSocket/External-Media (RTP). Swapping Asterisk
 #     for an embedded SIP/WebRTC client later only touches telephony.asterisk.ts.
+#   * avatar-renderer — (Phase 4) a SEPARATE self-hosted sidecar process that
+#     performs the talking-head/lip-sync ML inference. roza-agent runs NO ML
+#     in-process (Req 2.6): it orchestrates this sidecar over an HTTP/IPC
+#     boundary (AVATAR_RENDERER_ENDPOINT) behind a swappable interface
+#     (src/connectors/avatar/renderer.ts). Built from docker/avatar-renderer/
+#     (LivePortrait MIT code + a commercially-licensed face-analysis substitute
+#     + a commercially-licensed lip-sync checkpoint). Reachable by roza-agent
+#     only on the internal compose network; it exposes no committed secret.
 #
 # Configuration is injected via ${VAR} interpolation from the shell environment
 # or a sibling `.env` file (copied from `.env.example`).
 #
 # NEVER hardcode secret values here. Provide them via a local `.env` file or
-# your shell environment. SIP_* / TTS_* / STT_* / VOICE_* are the variable
-# names src/config.ts reads at startup.
+# your shell environment. SIP_* / TTS_* / STT_* / VOICE_* / AVATAR_* / MEET_* /
+# STREAM_* / RTMP_* are the variable names src/config.ts reads at startup.
+#
+# -----------------------------------------------------------------------------
+# Phase 4 host-level deployment constraints (DOCUMENTED, not hard runtime gates)
+# -----------------------------------------------------------------------------
+# The avatar PRESENCE pipeline relies on HOST-level virtual devices that live
+# OUTSIDE these containers and must be provisioned by the operator on the host:
+#
+#   * Virtual_Camera — the `v4l2loopback` kernel module (GPL-2.0, loaded on the
+#     host: `modprobe v4l2loopback`) exposes a /dev/video* node that roza-agent
+#     feeds rendered frames into via GStreamer/ffmpeg (AVATAR_CAMERA_DEVICE).
+#   * Virtual_Microphone — a PipeWire (or PulseAudio) null sink (MIT) on the
+#     host exposes the reply audio as a microphone source (AVATAR_MIC_DEVICE).
+#
+# These are kernel-module / null-sink endpoints; they are deployment
+# prerequisites surfaced as comments here, NOT services, and NOT a hard runtime
+# requirement that aborts startup (with AVATAR_ENABLED=false nothing here is
+# constructed). See docker/avatar-renderer/README.md for provisioning notes.
+#
+#   * CPU/GPU expectation (Req 10.2): conversational-latency lip-sync generally
+#     wants a GPU on the avatar-renderer host. This is a DOCUMENTED deployment
+#     constraint, NOT a hard runtime gate — on CPU-only hosts synthesis is
+#     slower and Roza falls back to audio-only delivery (Req 9.2). Operators who
+#     run the renderer on a GPU host should attach the GPU there (e.g. the
+#     NVIDIA Container Toolkit `deploy.resources.reservations.devices` / `gpus`)
+#     — left commented below so the default compose runs on a plain CPU VPS.
 # ==========================================
 
 services:
@@ -115,6 +148,52 @@ services:
       # End-to-end and ring-timeout latency bounds.
       VOICE_RESPONSE_LATENCY_MS: ${VOICE_RESPONSE_LATENCY_MS:-}
       VOICE_RING_TIMEOUT_MS: ${VOICE_RING_TIMEOUT_MS:-}
+
+      # --- Phase 4: Avatar video & live streaming (self-hosted, swappable) ---
+      #     AVATAR_ENABLED defaults to false; with it false NONE of the avatar
+      #     path is constructed and startup is byte-for-byte Phase 3. roza-agent
+      #     performs NO ML in-process — it orchestrates the avatar-renderer
+      #     sidecar over AVATAR_RENDERER_ENDPOINT (HTTP/IPC). MEET_*/STREAM_*
+      #     secrets are required only when their sub-capability is enabled and
+      #     are NEVER hardcoded here — injected via ${VAR} interpolation.
+      AVATAR_ENABLED: ${AVATAR_ENABLED:-false}
+
+      # Avatar_Video_Format the renderer must emit and the devices consume.
+      AVATAR_WIDTH: ${AVATAR_WIDTH:-}
+      AVATAR_HEIGHT: ${AVATAR_HEIGHT:-}
+      AVATAR_FPS: ${AVATAR_FPS:-}
+      AVATAR_PIXEL_FORMAT: ${AVATAR_PIXEL_FORMAT:-}
+
+      # Synthesis latency budget; on overrun → audio-only fallback.
+      AVATAR_RENDER_LATENCY_MS: ${AVATAR_RENDER_LATENCY_MS:-}
+
+      # Renderer sidecar endpoint + engine label (NOT a secret). Defaults to the
+      # in-network avatar-renderer service so the Node adapter reaches it over
+      # the internal compose network.
+      AVATAR_RENDERER_ENDPOINT: ${AVATAR_RENDERER_ENDPOINT:-http://avatar-renderer:9009}
+      AVATAR_ENGINE: ${AVATAR_ENGINE:-}
+
+      # Host virtual-device names (NOT secrets). These point at the host-level
+      # v4l2loopback camera node and PipeWire null-sink source provisioned
+      # outside the containers (see the header notes + avatar-renderer README).
+      AVATAR_CAMERA_DEVICE: ${AVATAR_CAMERA_DEVICE:-}
+      AVATAR_MIC_DEVICE: ${AVATAR_MIC_DEVICE:-}
+
+      # Google Meet presence sub-capability. MEET_ENABLED defaults to false; the
+      # Meet_Credentials (MEET_ACCOUNT/MEET_PASSWORD) are required only when it
+      # is enabled, MEET_CONSENT must be true before any join, and credentials
+      # are NEVER hardcoded here.
+      MEET_ENABLED: ${MEET_ENABLED:-false}
+      MEET_CONSENT: ${MEET_CONSENT:-false}
+      MEET_ACCOUNT: ${MEET_ACCOUNT:-}
+      MEET_PASSWORD: ${MEET_PASSWORD:-}
+
+      # Optional live RTMP streaming sub-capability. STREAM_ENABLED defaults to
+      # false; the STREAM_KEY is a secret required only when it is enabled and
+      # is NEVER hardcoded or logged. RTMP_URL is the RTMP_Target ingest URL.
+      STREAM_ENABLED: ${STREAM_ENABLED:-false}
+      RTMP_URL: ${RTMP_URL:-}
+      STREAM_KEY: ${STREAM_KEY:-}
     volumes:
       # Durable volume: persists roza_mind.sqlite across container restarts.
       - ./data:/app/data
@@ -152,6 +231,69 @@ services:
     # NOTE: the ARI HTTP/WebSocket control plane (default port 8088) is
     # intentionally NOT published to the host. roza-agent reaches it only over
     # the internal `roza-net` network at http://asterisk:8088.
+
+  avatar-renderer:
+    # Phase 4: the EXTERNAL avatar-render sidecar — the ONLY component that
+    # performs ML inference and the only one that benefits from a GPU. Built
+    # from docker/avatar-renderer/ (LivePortrait MIT engine code + a
+    # commercially-licensed face-analysis substitute such as MediaPipe Face
+    # Landmarker / OpenCV YuNet + a commercially-licensed lip-sync checkpoint;
+    # the non-commercial InsightFace/Wav2Lip stock weights are excluded — see
+    # docker/avatar-renderer/README.md). roza-agent runs NO ML in-process: it
+    # orchestrates this sidecar over the HTTP/IPC render endpoint behind the
+    # swappable src/connectors/avatar/renderer.ts interface, so swapping engines
+    # (MuseTalk, SadTalker, ...) only re-implements that adapter.
+    #
+    # Isolating it as a sidecar also lets it run on a DIFFERENT (GPU) host than
+    # the Node container. It exposes ONLY the render endpoint and reads NO
+    # committed secret value (AVATAR_* below are non-secret tuning/paths).
+    build:
+      context: .
+      dockerfile: docker/avatar-renderer/Dockerfile
+    image: roza-avatar-renderer:latest
+    container_name: roza-avatar-renderer
+    restart: unless-stopped
+    networks:
+      - roza-net
+    environment:
+      # Render endpoint bind + engine selection (NOT secrets). The endpoint host
+      # the Node adapter targets is AVATAR_RENDERER_ENDPOINT on roza-agent; this
+      # is the in-container listen address/port for the same service.
+      AVATAR_RENDERER_BIND: ${AVATAR_RENDERER_BIND:-0.0.0.0}
+      AVATAR_RENDERER_PORT: ${AVATAR_RENDERER_PORT:-9009}
+      AVATAR_ENGINE: ${AVATAR_ENGINE:-}
+      # Avatar_Video_Format the sidecar must emit (mirrors the Node config so
+      # the produced frames match what the virtual camera consumes).
+      AVATAR_WIDTH: ${AVATAR_WIDTH:-}
+      AVATAR_HEIGHT: ${AVATAR_HEIGHT:-}
+      AVATAR_FPS: ${AVATAR_FPS:-}
+      AVATAR_PIXEL_FORMAT: ${AVATAR_PIXEL_FORMAT:-}
+      # Operator-provisioned, commercially-licensed model-weights path (mounted
+      # below). NOT a secret — a filesystem location inside the sidecar.
+      AVATAR_WEIGHTS_DIR: ${AVATAR_WEIGHTS_DIR:-/opt/avatar/weights}
+    volumes:
+      # Operator-provided model weights / face-analysis assets, mounted
+      # read-only. Kept OUT of the committed image so a commercially-licensed
+      # checkpoint can be supplied at deploy time (the image ships only the
+      # MIT engine code + the commercial face-analysis substitute).
+      - ./docker/avatar-renderer/weights:/opt/avatar/weights:ro
+    # The render endpoint is reachable by roza-agent only on the internal
+    # `roza-net` network (http://avatar-renderer:9009) — intentionally NOT
+    # published to the host.
+    #
+    # GPU is a DOCUMENTED deployment constraint, not a hard runtime gate
+    # (Req 10.2/10.4): conversational-latency lip-sync wants a GPU, but the
+    # sidecar also runs CPU-only (slower) and Roza falls back to audio-only.
+    # To attach a GPU on a GPU host, uncomment (NVIDIA Container Toolkit):
+    #   gpus: all
+    #   # or, for compose deploy syntax:
+    #   # deploy:
+    #   #   resources:
+    #   #     reservations:
+    #   #       devices:
+    #   #         - driver: nvidia
+    #   #           count: 1
+    #   #           capabilities: [gpu]
 
 networks:
   # Internal bridge network shared by roza-agent and asterisk. Service-to-service

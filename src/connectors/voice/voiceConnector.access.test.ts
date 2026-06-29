@@ -98,6 +98,15 @@ function makeConfig(allowlist: string[], defaultAccess: VoiceDefaultAccess): Roz
       allowlist: [],
     },
     voice,
+    avatar: {
+      enabled: false,
+      video: { width: 512, height: 512, fps: 25, pixelFormat: 'yuv420p' },
+      latency: { renderMs: 4000 },
+      renderer: { endpoint: '', engine: '' },
+      devices: { camera: '', microphone: '' },
+      meet: { enabled: false, consent: false, account: '', password: '' },
+      stream: { enabled: false, url: '', key: '' },
+    },
   };
 }
 

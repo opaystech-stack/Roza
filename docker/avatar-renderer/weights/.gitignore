@@ -1,0 +1,10 @@
+# Operator-provided, commercially-licensed avatar model weights / face-analysis
+# assets are mounted read-only into the avatar-renderer sidecar at deploy time
+# (compose: ./docker/avatar-renderer/weights -> /opt/avatar/weights:ro).
+#
+# They are licensed separately, may be large, and MUST NOT be committed.
+# Keep this directory present (for the bind mount) but ignore its contents.
+# NEVER place InsightFace stock models or Wav2Lip non-commercial checkpoints
+# here — see ../README.md for the commercial-use licensing rules.
+*
+!.gitignore

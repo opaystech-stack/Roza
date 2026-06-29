@@ -97,6 +97,12 @@ const REQUIRED_OSS_DEPS = ['grammy', 'imapflow', 'mailparser', 'nodemailer'] as 
  * Excluded integrations that belong to FUTURE phases (Req 15.2). Matched against
  * external package specifiers and dependency names. Each pattern is anchored to
  * a package-name segment so it cannot false-positive on an unrelated substring.
+ *
+ * NOTE: browser automation (Playwright/Puppeteer) is intentionally NOT excluded.
+ * Per the project's golden rule it is the APPROVED open-source approach over
+ * paid APIs, and Phase 4 legitimately ships it (Google Meet avatar sessions via
+ * `src/connectors/avatar/meetSession.ts`). The genuinely-excluded set remains
+ * paid voice/avatar SaaS and X/Twitter client SDKs.
  */
 const EXCLUDED_INTEGRATIONS: { label: string; pattern: RegExp }[] = [
   { label: 'ElevenLabs (voice)', pattern: /(^|[/@])elevenlabs/i },
@@ -104,8 +110,6 @@ const EXCLUDED_INTEGRATIONS: { label: string; pattern: RegExp }[] = [
   { label: 'HeyGen (avatar/video)', pattern: /(^|[/@])heygen/i },
   { label: 'Tavus (avatar/video)', pattern: /(^|[/@])tavus/i },
   { label: 'X / Twitter SDK', pattern: /(^|[/@])(twitter|twit)($|[-/])/i },
-  { label: 'Playwright (browser automation)', pattern: /(^|[/@])playwright/i },
-  { label: 'Puppeteer (browser automation)', pattern: /(^|[/@])puppeteer/i },
 ];
 
 interface PackageJson {
@@ -158,7 +162,7 @@ describe('Phase 2 scope — no excluded-integration imports (Req 15.2)', () => {
     expect(sourceFiles.length, `no .ts source files found under ${SRC_DIR}`).toBeGreaterThan(0);
   });
 
-  it('no source module imports a future-phase integration (X/voice/avatar/browser automation)', () => {
+  it('no source module imports a future-phase integration (X/voice/avatar paid SaaS)', () => {
     const violations: string[] = [];
 
     for (const file of sourceFiles) {
@@ -268,6 +272,15 @@ describe('Phase 2 scope — the voice channel is never operative (Req 15.3)', ()
         stt: { engine: 'whisper.cpp', model: 'ggml-base.en' },
         maxReplyChars: 1000,
         latency: { ttsMs: 5000, sttMs: 5000, endToEndMs: 8000, ringTimeoutMs: 30000 },
+      },
+      avatar: {
+        enabled: false,
+        video: { width: 512, height: 512, fps: 25, pixelFormat: 'yuv420p' },
+        latency: { renderMs: 4000 },
+        renderer: { endpoint: '', engine: '' },
+        devices: { camera: '', microphone: '' },
+        meet: { enabled: false, consent: false, account: '', password: '' },
+        stream: { enabled: false, url: '', key: '' },
       },
     };
   }

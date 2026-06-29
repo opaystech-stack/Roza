@@ -97,6 +97,10 @@ const REQUIRED_TABLES: Record<string, readonly string[]> = {
     'ended_at',
     'turns',
   ],
+  // Phase 4 (Req 6.6, 7.4, 8.5, 9.1, 10.3): additive, audit-only Avatar_Session log.
+  // Holds NO credential — no Meet_Credentials, no Stream_Key; `target` is only a
+  // meet URL / RTMP ingest URL.
+  avatar_sessions: ['id', 'kind', 'target', 'outcome', 'started_at', 'ended_at'],
 };
 
 /** Resolve the absolute path to the Roza_Mind_Database file under `dataDir`. */
@@ -109,12 +113,14 @@ export function resolveDbPath(dataDir: string): string {
  * (Req 2.5), the three additive Phase 2 tables — `roza_profile` (Req 1.4),
  * `inbound_queue` (Req 10.2–10.4), and `processed_messages` (Req 11.1, 11.3,
  * 11.5) — and the additive Phase 3 `call_sessions` audit table (Req 4.6, 5.4,
- * 7.5, 9.1) inside a single transaction so initialization is all-or-none: if
- * any statement fails, the whole batch rolls back and no partial schema remains
- * (Req 3.2). Every statement is an idempotent `CREATE TABLE/INDEX IF NOT
- * EXISTS`, so an existing Phase 1/2 database gains the later tables without any
- * destructive migration. The DDL carries the CHECK constraints, indexes, and
- * the forward-compatible channel values from the design.
+ * 7.5, 9.1) and the additive Phase 4 `avatar_sessions` audit table (Req 6.6,
+ * 7.4, 8.5, 9.1, 10.3) inside a single transaction so initialization is
+ * all-or-none: if any statement fails, the whole batch rolls back and no
+ * partial schema remains (Req 3.2). Every statement is an idempotent `CREATE
+ * TABLE/INDEX IF NOT EXISTS`, so an existing Phase 1/2/3 database gains the
+ * later tables without any destructive migration. The DDL carries the CHECK
+ * constraints, indexes, and the forward-compatible channel values from the
+ * design.
  */
 export function initSchema(db: Database.Database): void {
   const create = db.transaction(() => {
@@ -213,6 +219,21 @@ export function initSchema(db: Database.Database): void {
         turns           INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_call_user_time ON call_sessions(user_id, started_at DESC);
+
+      -- avatar_sessions (Phase 4 — Req 6.6, 7.4, 8.5, 9.1, 10.3): additive, audit-only
+      -- Avatar_Session log for the render/Meet/stream presence capability. Stores NO
+      -- credential (no Meet_Credentials, no Stream_Key); the target column holds ONLY a
+      -- meet URL / RTMP ingest URL (Req 8.5). The render/present loop never blocks on this audit.
+      CREATE TABLE IF NOT EXISTS avatar_sessions (
+        id          TEXT PRIMARY KEY,
+        kind        TEXT NOT NULL CHECK (kind IN ('render','meet','stream')),
+        target      TEXT,
+        outcome     TEXT NOT NULL DEFAULT 'in_progress'
+                    CHECK (outcome IN ('in_progress','presented','audio_only_fallback','failed','stopped')),
+        started_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        ended_at    TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_avatar_kind_time ON avatar_sessions(kind, started_at DESC);
     `);
   });
 

@@ -75,6 +75,15 @@ function makeConfig(voiceEnabled: boolean): RozaConfig {
       maxReplyChars: 1000,
       latency: { ttsMs: 5000, sttMs: 5000, endToEndMs: 8000, ringTimeoutMs: 30000 },
     },
+    avatar: {
+      enabled: false,
+      video: { width: 512, height: 512, fps: 25, pixelFormat: 'yuv420p' },
+      latency: { renderMs: 4000 },
+      renderer: { endpoint: '', engine: '' },
+      devices: { camera: '', microphone: '' },
+      meet: { enabled: false, consent: false, account: '', password: '' },
+      stream: { enabled: false, url: '', key: '' },
+    },
   };
 }
 

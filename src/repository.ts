@@ -168,6 +168,41 @@ export interface NewCallSession {
   startedAt?: string;
 }
 
+/**
+ * Kind of an Avatar_Session presence (Phase 4 — Req 6.6, 7.4, 9.1): a one-shot
+ * video `render`, a Google `meet` appearance, or a live RTMP `stream`.
+ */
+export type AvatarSessionKind = 'render' | 'meet' | 'stream';
+
+/**
+ * Lifecycle outcome of an Avatar_Session (Phase 4 — Req 9.1, 10.3). A session
+ * opens as `in_progress` and is later closed with a terminal outcome:
+ * `presented` (video shown), `audio_only_fallback` (render degraded to audio,
+ * Req 9.2), `failed`, or `stopped`.
+ */
+export type AvatarOutcome =
+  | 'in_progress'
+  | 'presented'
+  | 'audio_only_fallback'
+  | 'failed'
+  | 'stopped';
+
+/**
+ * An `avatar_sessions` audit row (Phase 4 — Req 6.6, 7.4, 8.5, 9.1, 10.3). This
+ * is an additive, audit-only log for the render/Meet/stream presence
+ * capability: it holds NO credential value — never a Meet_Credentials and never
+ * the Stream_Key (Req 8.5). `target` holds ONLY a meet URL / RTMP ingest URL,
+ * or `null` for a bare `render`.
+ */
+export interface AvatarSession {
+  id: string;
+  kind: AvatarSessionKind;
+  target: string | null;
+  outcome: AvatarOutcome;
+  started_at: string;
+  ended_at: string | null;
+}
+
 /** Typed CRUD gateway used by the Cognitive Engine (design Component 4). */
 export interface Repository {
   // Human_Relationships (Req 6.1, 6.5, 6.6, 6.8, 7.3)
@@ -216,6 +251,13 @@ export interface Repository {
   incrementCallTurn(id: string): void;
   endCallSession(id: string, outcome: CallOutcome, at: string): void;
   getCallSession(id: string): CallSession | null;
+
+  // Avatar_Session audit log (Phase 4 — Req 6.6, 7.4, 8.5, 9.1, 10.3):
+  // additive, audit-only; the render/present loop never blocks on these writes.
+  // Stores NO credential and NEVER the Stream_Key — `target` is only a meet URL
+  // / RTMP ingest URL.
+  startAvatarSession(kind: AvatarSessionKind, target?: string | null): AvatarSession;
+  endAvatarSession(id: string, outcome: AvatarOutcome, at: string): void;
 
   // Transactions
   tx<T>(fn: () => T): T;
@@ -364,6 +406,21 @@ export function createRepository(
   );
   const updateCallSessionEnd = db.prepare(
     'UPDATE call_sessions SET outcome = @outcome, ended_at = @ended_at WHERE id = @id'
+  );
+
+  // --- Phase 4 prepared statements (Req 6.6, 7.4, 8.5, 9.1, 10.3) --------
+
+  const insertAvatarSession = db.prepare(
+    `INSERT INTO avatar_sessions
+       (id, kind, target, outcome, started_at, ended_at)
+     VALUES
+       (@id, @kind, @target, 'in_progress', @started_at, NULL)`
+  );
+  const selectAvatarSessionById = db.prepare(
+    'SELECT * FROM avatar_sessions WHERE id = ?'
+  );
+  const updateAvatarSessionEnd = db.prepare(
+    'UPDATE avatar_sessions SET outcome = @outcome, ended_at = @ended_at WHERE id = @id'
   );
 
   // --- Human_Relationships ----------------------------------------------
@@ -615,6 +672,37 @@ export function createRepository(
     return row ?? null;
   }
 
+  // --- Avatar_Session audit log (Phase 4 — Req 6.6, 7.4, 8.5, 9.1, 10.3) -
+
+  function startAvatarSession(
+    kind: AvatarSessionKind,
+    target?: string | null
+  ): AvatarSession {
+    // Req 6.6, 9.1: open an audit-only Avatar_Session as `in_progress` with a
+    // fresh UUID. `target` holds ONLY a meet URL / RTMP ingest URL — never a
+    // credential and never the Stream_Key (Req 8.5). The render/present loop
+    // never blocks on this write. Wrapped in the Phase 1 `tx` so the insert and
+    // read-back are atomic.
+    return tx(() => {
+      const id = randomUUID();
+      insertAvatarSession.run({
+        id,
+        kind,
+        target: target ?? null,
+        started_at: isoNow(),
+      });
+      return selectAvatarSessionById.get(id) as AvatarSession;
+    });
+  }
+
+  function endAvatarSession(id: string, outcome: AvatarOutcome, at: string): void {
+    // Req 9.1, 10.3: close the session with a terminal outcome and ended_at
+    // stamp. Audit-only; the render/present loop never blocks on this write.
+    tx(() => {
+      updateAvatarSessionEnd.run({ id, outcome, ended_at: at });
+    });
+  }
+
   // --- Transactions ------------------------------------------------------
 
   function tx<T>(fn: () => T): T {
@@ -647,6 +735,8 @@ export function createRepository(
     incrementCallTurn,
     endCallSession,
     getCallSession,
+    startAvatarSession,
+    endAvatarSession,
     tx,
   };
 }

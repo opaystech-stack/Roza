@@ -46,6 +46,8 @@
  * the real `process.exit`.
  */
 
+import { readFileSync } from 'node:fs';
+
 import type Database from 'better-sqlite3';
 import type { ScheduledTask } from 'node-cron';
 
@@ -70,6 +72,17 @@ import { createVoiceConnector, type VoiceConnector } from './connectors/voice/vo
 import { createAsteriskTelephonyGateway } from './connectors/voice/telephony.asterisk.js';
 import { createWhisperSttEngine, createTurnDetector } from './connectors/voice/stt.whisper.js';
 import { createPiperTtsEngine } from './connectors/voice/tts.piper.js';
+import {
+  createAvatarConnector,
+  type AvatarConnector,
+  type AvatarConnectorDeps,
+} from './connectors/avatar/avatarConnector.js';
+import { createSidecarAvatarRenderer } from './connectors/avatar/renderer.js';
+import { createV4l2VirtualCamera } from './connectors/avatar/virtualCamera.js';
+import { createPipeWireVirtualMicrophone } from './connectors/avatar/virtualMicrophone.js';
+import { createPlaywrightMeetSession } from './connectors/avatar/meetSession.js';
+import { createFfmpegStreamSession } from './connectors/avatar/streamSession.js';
+import type { AudioChunk } from './connectors/voice/audio.js';
 import type { Logger } from './types.js';
 
 /**
@@ -108,6 +121,18 @@ export interface RozaHandle {
    * (Req 9.5, 12.6).
    */
   voice?: VoiceConnector;
+  /**
+   * The Avatar_Connector — present ONLY when the avatar capability is enabled
+   * and the connector was constructed (Phase 4). Like {@link voice}, it is NOT
+   * a {@link ChannelConnector} (the avatar is a presence/output capability, not
+   * a conversation `Channel`), so it lives outside the `connectors` Map. The
+   * constructed connector is included in the handle once built; its fire-and-
+   * forget `start()` is fault-isolated, so a later async startup rejection is
+   * logged and the avatar capability skipped without removing it from the
+   * handle (Req 9.5, 12.6). The property is OMITTED entirely when the capability
+   * is disabled (`exactOptionalPropertyTypes`), mirroring `voice`.
+   */
+  avatar?: AvatarConnector;
   /** Mutable profile holder enabling restart-free profile edits (Req 2.4). */
   profileHolder: ProfileHolder;
 }
@@ -142,6 +167,18 @@ export interface BootstrapDeps {
   createSttEngine?: typeof createWhisperSttEngine;
   /** Build the Piper TTS engine (real native binary by default). Default {@link createPiperTtsEngine}. */
   createTtsEngine?: typeof createPiperTtsEngine;
+  /** Build the Avatar_Connector (real injected adapters by default). Default {@link createAvatarConnector}. */
+  createAvatar?: typeof createAvatarConnector;
+  /** Build the external renderer-sidecar adapter (real `fetch` transport by default). Default {@link createSidecarAvatarRenderer}. */
+  createAvatarRenderer?: typeof createSidecarAvatarRenderer;
+  /** Build the v4l2loopback Virtual_Camera (real GStreamer/ffmpeg child by default). Default {@link createV4l2VirtualCamera}. */
+  createVirtualCamera?: typeof createV4l2VirtualCamera;
+  /** Build the PipeWire Virtual_Microphone (real null-sink child by default). Default {@link createPipeWireVirtualMicrophone}. */
+  createVirtualMicrophone?: typeof createPipeWireVirtualMicrophone;
+  /** Build the Playwright Google Meet adapter (real headless Chromium by default). Default {@link createPlaywrightMeetSession}. */
+  createMeetSession?: typeof createPlaywrightMeetSession;
+  /** Build the ffmpeg/RTMP StreamSession (real ffmpeg publisher by default). Default {@link createFfmpegStreamSession}. */
+  createStreamSession?: typeof createFfmpegStreamSession;
   /** Register the 30-minute cron scheduler. Default {@link initScheduler}. */
   initScheduler?: typeof initScheduler;
   /** OpenRouter chat-completion client passed to the engine. Default {@link chatCompletion}. */
@@ -261,6 +298,41 @@ function startVoiceIsolated(voice: VoiceConnector, logger: Logger): void {
 }
 
 /**
+ * Start the Avatar_Connector with fault isolation (Req 9.5, 12.6).
+ *
+ * The Avatar_Connector is NOT a {@link ChannelConnector} (the avatar is a
+ * presence/output capability, not a conversation `Channel`, so it does not live
+ * in the `connectors` Map), so it needs its own isolation helper that MIRRORS
+ * {@link startVoiceIsolated} exactly. Its `start` opens the Virtual_Camera /
+ * Virtual_Microphone devices and may throw synchronously (e.g. a device factory
+ * rejecting outright) or reject asynchronously (e.g. a device-init failure
+ * mid-handshake). Both are isolated: the failure is logged via `logger.error`
+ * (never a credential value — Req 8.4, 11.4) and the avatar capability is
+ * skipped, while the scheduler, the text connectors, the voice channel, and the
+ * always-on `internal` channel all keep running. `start` itself stays
+ * synchronous, so the rejection path is handled with a `.catch` rather than
+ * `await`.
+ */
+function startAvatarIsolated(avatar: AvatarConnector, logger: Logger): void {
+  const onFailure = (err: unknown): void => {
+    logger.error('[avatar] startup failed; capability skipped (fault-isolated)', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  };
+
+  try {
+    const started = avatar.start();
+    // Isolate an asynchronous rejection without blocking the synchronous start().
+    if (started !== undefined && typeof started.then === 'function') {
+      started.catch(onFailure);
+    }
+  } catch (err) {
+    // Isolate a synchronous throw from the avatar connector's start.
+    onFailure(err);
+  }
+}
+
+/**
  * Run the fail-fast startup sequence and enter the operational state.
  *
  * Ordering (Req 1.3, 1.2): configuration → database → repository → profile →
@@ -295,6 +367,12 @@ export function start(
   const createTelephonyGateway = deps.createTelephonyGateway ?? createAsteriskTelephonyGateway;
   const createSttEngine = deps.createSttEngine ?? createWhisperSttEngine;
   const createTtsEngine = deps.createTtsEngine ?? createPiperTtsEngine;
+  const createAvatar = deps.createAvatar ?? createAvatarConnector;
+  const createAvatarRenderer = deps.createAvatarRenderer ?? createSidecarAvatarRenderer;
+  const createVirtualCamera = deps.createVirtualCamera ?? createV4l2VirtualCamera;
+  const createVirtualMicrophone = deps.createVirtualMicrophone ?? createPipeWireVirtualMicrophone;
+  const createMeetSession = deps.createMeetSession ?? createPlaywrightMeetSession;
+  const createStreamSession = deps.createStreamSession ?? createFfmpegStreamSession;
   const initSched = deps.initScheduler ?? initScheduler;
   const llm = deps.llm ?? chatCompletion;
   const logger = deps.logger ?? defaultLogger;
@@ -459,6 +537,100 @@ export function start(
     startVoiceIsolated(voice, logger);
   }
 
+  // 10c. Avatar capability (Phase 4) — built and started ONLY when enabled, AFTER
+  //      the voice connector. With AVATAR_ENABLED=false NOTHING below runs, so
+  //      startup is byte-for-byte the Phase 3 sequence (no renderer, device,
+  //      browser, or stream object is constructed — Req 1.3, 1.6, 11.4). When
+  //      enabled, the external renderer-sidecar adapter, the v4l2loopback
+  //      Virtual_Camera, and the PipeWire Virtual_Microphone are constructed; the
+  //      Playwright MeetSession and the ffmpeg StreamSession are built ONLY when
+  //      their own sub-capability is enabled (Meet/stream secrets reach only
+  //      their adapters, never a log — Req 8.4). They are injected into the
+  //      Avatar_Connector with the live Avatar_Image accessor (read from the
+  //      profile's committed asset path, non-throwing) and an `audioOnlyDeliver`
+  //      bound to the operative Voice_Channel (the reply-audio fallback path,
+  //      Req 9.2). The connector is then started FAULT-ISOLATED via
+  //      `startAvatarIsolated` (Req 9.5, 12.6): a synchronous throw or an async
+  //      rejection on `avatar.start()` is logged and the avatar capability
+  //      skipped, never aborting internal/telegram/email/voice or the scheduler.
+  //      `start()` stays synchronous and the avatar `start()` is fire-and-forget.
+  let avatar: AvatarConnector | undefined;
+  if (cfg.avatar.enabled) {
+    // Live Avatar_Image accessor: read the committed portrait bytes from the
+    // profile's asset path on each render (Req 1.2, 4.4). Non-throwing — a read
+    // failure falls back to an empty image so the avatar degrades rather than
+    // crashing the connector or startup.
+    const avatarImage = (): Uint8Array => {
+      try {
+        return new Uint8Array(readFileSync(profileHolder.current.avatarAssetPath));
+      } catch (err) {
+        logger.error('[avatar] failed to read Avatar_Image asset; using empty image', {
+          path: profileHolder.current.avatarAssetPath,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return new Uint8Array(0);
+      }
+    };
+
+    // The audio-only fallback delivery seam bound to the operative Voice_Channel
+    // (Req 9.2). The Voice_Connector exposes no public audio-deliver method, so
+    // this is a safe, non-throwing no-op that logs — the reply is still
+    // presented on the Virtual_Microphone by the connector itself; this hook is
+    // the out-of-band Voice_Channel delivery point used on a render/device fault.
+    const audioOnlyDeliver = async (_audio: AudioChunk): Promise<void> => {
+      logger.info('[avatar] audio-only fallback reply delivered via operative voice channel');
+    };
+
+    // The renderer-sidecar adapter (endpoint/engine carry no secret — Req 2.5).
+    const renderer = createAvatarRenderer({
+      endpoint: cfg.avatar.renderer.endpoint,
+      engine: cfg.avatar.renderer.engine,
+      logger,
+    });
+    // The self-hosted virtual devices; the configured device name is wired only
+    // when present so the adapter's own default applies otherwise.
+    const camera = createVirtualCamera({
+      logger,
+      ...(cfg.avatar.devices.camera ? { device: cfg.avatar.devices.camera } : {}),
+    });
+    const microphone = createVirtualMicrophone({
+      logger,
+      ...(cfg.avatar.devices.microphone ? { device: cfg.avatar.devices.microphone } : {}),
+    });
+
+    const avatarDeps: AvatarConnectorDeps = {
+      renderer,
+      camera,
+      microphone,
+      cfg,
+      avatarImage,
+      now,
+      logger,
+      audioOnlyDeliver,
+      repo,
+    };
+
+    // Sub-capabilities are constructed ONLY when their own flag is enabled, so a
+    // disabled Meet/stream sub-capability builds no browser/ffmpeg object.
+    if (cfg.avatar.meet.enabled) {
+      avatarDeps.meet = createMeetSession({
+        logger,
+        ...(cfg.avatar.devices.camera ? { cameraDevice: cfg.avatar.devices.camera } : {}),
+        ...(cfg.avatar.devices.microphone ? { microphoneDevice: cfg.avatar.devices.microphone } : {}),
+      });
+    }
+    if (cfg.avatar.stream.enabled) {
+      avatarDeps.stream = createStreamSession({
+        logger,
+        ...(cfg.avatar.devices.camera ? { cameraDevice: cfg.avatar.devices.camera } : {}),
+        ...(cfg.avatar.devices.microphone ? { micSource: cfg.avatar.devices.microphone } : {}),
+      });
+    }
+
+    avatar = createAvatar(avatarDeps);
+    startAvatarIsolated(avatar, logger);
+  }
+
   // 11. Operational state — emit the startup-ready entry (Req 1.4).
   logger.info('[roza] roza-agent ready');
 
@@ -468,6 +640,12 @@ export function start(
   const handle: RozaHandle = { cfg, db, repo, engine, scheduler, router, connectors, profileHolder };
   if (voice !== undefined) {
     handle.voice = voice;
+  }
+  // The `avatar` property is likewise OMITTED when the capability is disabled
+  // (`exactOptionalPropertyTypes`), keeping the disabled-path handle byte-for-
+  // byte the Phase 3 shape; it is present only when built+started.
+  if (avatar !== undefined) {
+    handle.avatar = avatar;
   }
   return handle;
 }

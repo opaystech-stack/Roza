@@ -306,13 +306,16 @@ describe('Phase 3 scope — forward-looking video/X directions are FUTURE, not i
     ).toEqual([]);
   });
 
-  it('declares no X/Twitter client SDK or browser-automation dependency', () => {
-    // X/Twitter is a FUTURE direction (via browser automation, not implemented now).
-    const xTwitter = /(^|[/@])(twitter|twit($|[-/])|playwright|puppeteer)/i;
+  it('declares no X/Twitter client SDK dependency', () => {
+    // X/Twitter posting is a FUTURE direction. Only X/Twitter CLIENT SDKs are
+    // forbidden here. Browser automation (Playwright/Puppeteer) is NOT forbidden:
+    // per the golden rule it is the approved open-source approach, and Phase 4
+    // legitimately ships it for Google Meet avatar sessions.
+    const xTwitter = /(^|[/@])(twitter|twitter-api-v2|twit($|[-/])|node-twitter)/i;
     const violations = allDepNames.filter((name) => xTwitter.test(name));
     expect(
       violations,
-      `X/Twitter is a FUTURE direction and must not be implemented as a dependency: ${violations.join(', ')}`,
+      `X/Twitter client SDK is a FUTURE direction and must not be implemented as a dependency: ${violations.join(', ')}`,
     ).toEqual([]);
   });
 });

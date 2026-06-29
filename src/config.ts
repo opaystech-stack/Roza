@@ -44,6 +44,17 @@ const DEFAULT_VOICE_ACCESS: VoiceDefaultAccess = 'reject';
 /** Default inbound quiet-hours policy (Phase 3, Req 8.3). */
 const DEFAULT_QUIET_HOURS_INBOUND: QuietHoursInboundPolicy = 'take_message';
 
+/** Default avatar Video_Frame width in pixels (Phase 4, Req 2.3, 10.1). */
+const DEFAULT_AVATAR_WIDTH = 512;
+/** Default avatar Video_Frame height in pixels (Phase 4, Req 2.3, 10.1). */
+const DEFAULT_AVATAR_HEIGHT = 512;
+/** Default avatar frame rate in frames per second (Phase 4, Req 2.3, 10.1). */
+const DEFAULT_AVATAR_FPS = 25;
+/** Default avatar pixel/encoding format when `AVATAR_PIXEL_FORMAT` is not provided. */
+const DEFAULT_AVATAR_PIXEL_FORMAT: AvatarPixelFormat = 'yuv420p';
+/** Default synthesis latency budget, in ms; on overrun → audio-only fallback (Phase 4, Req 2.7, 10.1, 10.3). */
+const DEFAULT_AVATAR_RENDER_LATENCY_MS = 4000;
+
 /** Minutes in a single day; HH:MM values resolve to `[0, 1439]`. */
 const MINUTES_PER_DAY = 24 * 60;
 
@@ -139,6 +150,44 @@ export interface VoiceChannelConfig {
 }
 
 /**
+ * Pixel/encoding format of a rendered Video_Frame (Phase 4 — Avatar_Video_Format,
+ * Req 2.3). Parsed with the documented default `'yuv420p'`.
+ */
+export type AvatarPixelFormat = 'rgba' | 'yuv420p' | 'nv12';
+
+/**
+ * Avatar capability configuration (Phase 4, Req 1.1, 2.3, 6, 7, 8.1–8.4, 10.1).
+ *
+ * `enabled` reflects `AVATAR_ENABLED` (default false). The avatar is a
+ * configuration-gated presence/output capability, not a conversation `Channel`.
+ * The `video` Avatar_Video_Format, `latency` budget, `renderer` sidecar
+ * endpoint, and virtual `devices` names parse with documented defaults so an
+ * enabled capability always has a complete, tunable config. The `meet`
+ * sub-capability carries the operator-provided `Meet_Credentials`
+ * (account/password) validated non-blank only WHEN `meet.enabled`, plus a
+ * `consent` flag that must be true before any join. The `stream` sub-capability
+ * carries the optional `RTMP_Target` url and the secret `key`, validated
+ * non-blank only WHEN `stream.enabled`. Credential/key VALUES are never logged
+ * or surfaced — only the offending variable NAME (Req 8.4).
+ */
+export interface AvatarChannelConfig {
+  /** AVATAR_ENABLED (default false) — Req 1.1. */
+  enabled: boolean;
+  /** Avatar_Video_Format the renderer must emit and the devices consume — Req 2.3, 10.1. */
+  video: { width: number; height: number; fps: number; pixelFormat: AvatarPixelFormat };
+  /** Synthesis latency budget; on overrun → audio-only fallback — Req 2.7, 10.1, 10.3. */
+  latency: { renderMs: number };
+  /** Renderer sidecar endpoint and engine id (no secret) — Req 2.5, 2.6. */
+  renderer: { endpoint: string; engine: string };
+  /** Virtual-device names (no secret) — Req 5.4. */
+  devices: { camera: string; microphone: string };
+  /** Google Meet presence sub-capability — Req 6. Credentials validated only when `enabled`. */
+  meet: { enabled: boolean; consent: boolean; account: string; password: string };
+  /** Optional live RTMP streaming sub-capability — Req 7. Key validated only when `enabled`. */
+  stream: { enabled: boolean; url: string; key: string };
+}
+
+/**
  * Fully-resolved configuration consumed by the rest of the service. Required
  * secrets are guaranteed non-empty once this object exists.
  */
@@ -163,6 +212,8 @@ export interface RozaConfig {
   mail: MailChannelConfig;
   /** Voice channel enablement, SIP credentials, allowlist, and engine/latency settings (Phase 3). */
   voice: VoiceChannelConfig;
+  /** Avatar presence/output capability enablement, video/latency/renderer/device settings, and Meet/stream sub-capabilities (Phase 4). */
+  avatar: AvatarChannelConfig;
 }
 
 /** The two required environment variables (Req 1.7). */
@@ -190,6 +241,14 @@ export type MissingChannelVar =
  * value is never surfaced.
  */
 export type MissingVoiceVar = 'SIP_HOST' | 'SIP_PORT' | 'SIP_USER' | 'SIP_PASSWORD' | 'SIP_REALM';
+
+/**
+ * Meet/streaming secret environment variables that are required only when their
+ * owning sub-capability is enabled (Phase 4, Req 8.2). `MEET_ACCOUNT`/
+ * `MEET_PASSWORD` are the `Meet_Credentials`; `STREAM_KEY` is the `Stream_Key`.
+ * Reported by NAME only — the value is never surfaced (Req 8.4).
+ */
+export type MissingAvatarVar = 'MEET_ACCOUNT' | 'MEET_PASSWORD' | 'STREAM_KEY';
 
 /** Structured configuration error; carries the offending name, never a value. */
 export type ConfigError = { kind: 'ENV_MISSING'; name: MissingVar };
@@ -504,6 +563,92 @@ export function resolveVoiceConfig(
 }
 
 /**
+ * Pure parse of `AVATAR_PIXEL_FORMAT` (Phase 4, Req 2.3).
+ *
+ * Returns one of `'rgba' | 'yuv420p' | 'nv12'` for the matching (trimmed,
+ * case-insensitive) value; every other value resolves to the documented default
+ * `'yuv420p'`. Total (never throws).
+ */
+function parseAvatarPixelFormat(raw: string | undefined): AvatarPixelFormat {
+  const v = raw?.trim().toLowerCase();
+  return v === 'rgba' || v === 'yuv420p' || v === 'nv12' ? v : DEFAULT_AVATAR_PIXEL_FORMAT;
+}
+
+/**
+ * Pure resolution of the Avatar capability configuration (Phase 4, Req 1.1,
+ * 1.3, 2.3, 6.4, 7.3, 8.1–8.4, 10.1).
+ *
+ * Reads `AVATAR_ENABLED`. When the capability is DISABLED, the result is always
+ * `ok` with `enabled: false` and no error even if any Meet/RTMP secret is absent
+ * — the capability stays inert (Req 1.3, 8.3). When ENABLED, the video
+ * width/height/fps/pixel-format, the render latency budget, the renderer
+ * endpoint/engine, and the device names parse with documented defaults so an
+ * enabled capability always has a complete, tunable config (Req 2.3, 10.1).
+ *
+ * The Meet sub-capability is missing-checked ONLY when `MEET_ENABLED` is true:
+ * `MEET_ACCOUNT` and `MEET_PASSWORD` (the `Meet_Credentials`) blank/whitespace/
+ * undefined are collected by NAME in a stable order (Req 8.2); `MEET_CONSENT`
+ * parses as a boolean (default false) and is enforced at the connector gate
+ * (Req 6.4). The stream sub-capability is missing-checked ONLY when
+ * `STREAM_ENABLED` is true: a blank `STREAM_KEY` is collected by NAME — its
+ * VALUE is never surfaced (Req 8.4). Mirrors `resolveVoiceConfig` line-for-line.
+ */
+export function resolveAvatarConfig(
+  env: NodeJS.ProcessEnv
+): { ok: true; cfg: AvatarChannelConfig } | { ok: false; missing: MissingAvatarVar[] } {
+  const enabled = parseBoolFlag(env.AVATAR_ENABLED);
+  const meetEnabled = parseBoolFlag(env.MEET_ENABLED);
+  const streamEnabled = parseBoolFlag(env.STREAM_ENABLED);
+
+  const cfg: AvatarChannelConfig = {
+    enabled,
+    video: {
+      width: parsePositiveIntOr(env.AVATAR_WIDTH, DEFAULT_AVATAR_WIDTH),
+      height: parsePositiveIntOr(env.AVATAR_HEIGHT, DEFAULT_AVATAR_HEIGHT),
+      fps: parsePositiveIntOr(env.AVATAR_FPS, DEFAULT_AVATAR_FPS),
+      pixelFormat: parseAvatarPixelFormat(env.AVATAR_PIXEL_FORMAT),
+    },
+    latency: {
+      renderMs: parsePositiveIntOr(env.AVATAR_RENDER_LATENCY_MS, DEFAULT_AVATAR_RENDER_LATENCY_MS),
+    },
+    renderer: {
+      endpoint: env.AVATAR_RENDERER_ENDPOINT?.trim() ?? '',
+      engine: env.AVATAR_ENGINE?.trim() ?? '',
+    },
+    devices: {
+      camera: env.AVATAR_CAMERA_DEVICE?.trim() ?? '',
+      microphone: env.AVATAR_MIC_DEVICE?.trim() ?? '',
+    },
+    meet: {
+      enabled: meetEnabled,
+      consent: parseBoolFlag(env.MEET_CONSENT),
+      account: env.MEET_ACCOUNT?.trim() ?? '',
+      password: env.MEET_PASSWORD ?? '',
+    },
+    stream: {
+      enabled: streamEnabled,
+      url: env.RTMP_URL?.trim() ?? '',
+      key: env.STREAM_KEY ?? '',
+    },
+  };
+
+  if (!enabled) {
+    return { ok: true, cfg };
+  }
+
+  const missing: MissingAvatarVar[] = [];
+  if (meetEnabled && isBlank(env.MEET_ACCOUNT)) missing.push('MEET_ACCOUNT');
+  if (meetEnabled && isBlank(env.MEET_PASSWORD)) missing.push('MEET_PASSWORD');
+  if (streamEnabled && isBlank(env.STREAM_KEY)) missing.push('STREAM_KEY');
+
+  if (missing.length > 0) {
+    return { ok: false, missing };
+  }
+
+  return { ok: true, cfg };
+}
+
+/**
  * Imperative startup wrapper (Req 1.7, 2.4, 5.2).
  *
  * Validates required secrets; on failure it logs the variable NAME only (never
@@ -521,6 +666,12 @@ export function resolveVoiceConfig(
  * Phase 3 (Req 7.2, 7.3): the voice channel follows the identical contract.
  * When `VOICE_ENABLED` is true and any SIP trunk variable is missing, each is
  * logged by NAME and `process.exit(1)`; a disabled voice channel stays inert.
+ *
+ * Phase 4 (Req 8.2, 8.3): the avatar capability follows the identical contract.
+ * When the Meet sub-capability is enabled and `MEET_ACCOUNT`/`MEET_PASSWORD` are
+ * missing, or the stream sub-capability is enabled and `STREAM_KEY` is missing,
+ * each is logged by NAME (never the value) and `process.exit(1)`; a disabled
+ * avatar capability stays inert.
  */
 export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
   const required = validateRequiredEnv(env);
@@ -545,11 +696,13 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
   const telegram = resolveTelegramConfig(env);
   const mail = resolveMailConfig(env);
   const voice = resolveVoiceConfig(env);
-  if (!telegram.ok || !mail.ok || !voice.ok) {
-    const channelMissing: (MissingChannelVar | MissingVoiceVar)[] = [
+  const avatar = resolveAvatarConfig(env);
+  if (!telegram.ok || !mail.ok || !voice.ok || !avatar.ok) {
+    const channelMissing: (MissingChannelVar | MissingVoiceVar | MissingAvatarVar)[] = [
       ...(telegram.ok ? [] : telegram.missing),
       ...(mail.ok ? [] : mail.missing),
       ...(voice.ok ? [] : voice.missing),
+      ...(avatar.ok ? [] : avatar.missing),
     ];
     for (const name of channelMissing) {
       console.error(
@@ -575,5 +728,7 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
     mail: mail.cfg,
     // Phase 3: `voice` is `ok` here (the guard above exits otherwise).
     voice: voice.cfg,
+    // Phase 4: `avatar` is `ok` here (the guard above exits otherwise).
+    avatar: avatar.cfg,
   };
 }

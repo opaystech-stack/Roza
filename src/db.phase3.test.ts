@@ -126,8 +126,9 @@ describe('db.phase3 — additive call_sessions schema (Task 8.2, Req 4.6)', () =
       for (const table of ALL_TABLES) {
         expect(tables.has(table), `${table} should exist`).toBe(true);
       }
-      // Exactly the nine known tables — no more, no fewer.
-      expect(tables.size).toBe(ALL_TABLES.length);
+      // Every known prior-phase + Phase 3 table is present. A later phase may
+      // add further additive tables, so we assert a floor, not an exact ceiling.
+      expect(tables.size).toBeGreaterThanOrEqual(ALL_TABLES.length);
     } finally {
       db.close();
     }
