@@ -1,14 +1,24 @@
 # ==========================================
-# docker-compose.yml — Roza Agent (optional local run)
+# docker-compose.yml — Roza Agent (Phase 3: multi-service voice/telephony)
 #
-# Convenience for running Roza locally / outside Dokploy. Mounts ./data as a
-# durable volume (roza_mind.sqlite lives there) and injects configuration via
-# ${VAR} interpolation from the shell environment or a sibling `.env` file.
+# Convenience for running Roza locally / outside Dokploy. Defines two services
+# on a shared internal compose network:
 #
-# NEVER hardcode secret values here. Provide them via a local `.env` file
-# (copied from `.env.example`) or your shell environment.
+#   * roza-agent — the Node.js / TypeScript Cognitive_Engine (single isolated
+#     SQLite mind in ./data). Bundles the Piper (TTS) and whisper.cpp (STT)
+#     binaries inside its own image; talks to Asterisk over ARI + AudioSocket.
+#   * asterisk   — a self-hosted, open-source SIP/VoIP gateway (Asterisk, GPLv2)
+#     reachable by roza-agent only on the internal compose network. Roza's Node
+#     code controls it over the ARI HTTP/WebSocket control plane and bridges
+#     real-time audio over AudioSocket/External-Media (RTP). Swapping Asterisk
+#     for an embedded SIP/WebRTC client later only touches telephony.asterisk.ts.
 #
-# The variable names below are exactly what src/config.ts reads at startup.
+# Configuration is injected via ${VAR} interpolation from the shell environment
+# or a sibling `.env` file (copied from `.env.example`).
+#
+# NEVER hardcode secret values here. Provide them via a local `.env` file or
+# your shell environment. SIP_* / TTS_* / STT_* / VOICE_* are the variable
+# names src/config.ts reads at startup.
 # ==========================================
 
 services:
@@ -19,6 +29,11 @@ services:
     image: roza-agent:latest
     container_name: roza-agent
     restart: unless-stopped
+    # roza-agent talks to Asterisk's ARI; start it after the gateway is up.
+    depends_on:
+      - asterisk
+    networks:
+      - roza-net
     environment:
       # --- Required secrets (startup aborts if missing/empty/whitespace) ---
       ROZA_PRIVATE_KEY: ${ROZA_PRIVATE_KEY}
@@ -64,6 +79,83 @@ services:
       MAIL_SMTP_USER: ${MAIL_SMTP_USER:-}
       MAIL_SMTP_PASSWORD: ${MAIL_SMTP_PASSWORD:-}
       MAIL_ALLOWLIST: ${MAIL_ALLOWLIST:-}
+
+      # --- Phase 3: Voice channel (self-hosted Piper TTS + whisper.cpp STT,
+      #     Asterisk SIP/VoIP gateway). VOICE_ENABLED defaults to false; the
+      #     SIP_* credentials are required only when the channel is enabled and
+      #     are NEVER hardcoded here. Secrets are injected via ${VAR}. ---
+      VOICE_ENABLED: ${VOICE_ENABLED:-false}
+
+      # SIP trunk / gateway credentials (secret — required when VOICE_ENABLED=true).
+      # SIP_HOST defaults to the in-network Asterisk service hostname so the Node
+      # adapter reaches the gateway over the internal compose network.
+      SIP_HOST: ${SIP_HOST:-asterisk}
+      SIP_PORT: ${SIP_PORT:-}
+      SIP_USER: ${SIP_USER:-}
+      SIP_PASSWORD: ${SIP_PASSWORD:-}
+      SIP_REALM: ${SIP_REALM:-}
+
+      # Voice access control + right-to-disconnect inbound policy.
+      VOICE_ALLOWLIST: ${VOICE_ALLOWLIST:-}
+      VOICE_DEFAULT_ACCESS: ${VOICE_DEFAULT_ACCESS:-}
+      VOICE_QUIET_HOURS_INBOUND: ${VOICE_QUIET_HOURS_INBOUND:-}
+
+      # Text-to-Speech (Piper) tuning.
+      TTS_ENGINE: ${TTS_ENGINE:-}
+      TTS_VOICE: ${TTS_VOICE:-}
+      TTS_MODEL: ${TTS_MODEL:-}
+      TTS_MAX_REPLY_CHARS: ${TTS_MAX_REPLY_CHARS:-}
+      TTS_LATENCY_MS: ${TTS_LATENCY_MS:-}
+
+      # Speech-to-Text (whisper.cpp) tuning.
+      STT_ENGINE: ${STT_ENGINE:-}
+      STT_MODEL: ${STT_MODEL:-}
+      STT_LATENCY_MS: ${STT_LATENCY_MS:-}
+
+      # End-to-end and ring-timeout latency bounds.
+      VOICE_RESPONSE_LATENCY_MS: ${VOICE_RESPONSE_LATENCY_MS:-}
+      VOICE_RING_TIMEOUT_MS: ${VOICE_RING_TIMEOUT_MS:-}
     volumes:
       # Durable volume: persists roza_mind.sqlite across container restarts.
       - ./data:/app/data
+
+  asterisk:
+    # Self-hosted, open-source SIP/VoIP gateway (GPLv2). Pinned community image;
+    # operators may further pin by digest for reproducible deploys. No paid
+    # cloud telephony API is used.
+    image: andrius/asterisk:18-current
+    container_name: roza-asterisk
+    restart: unless-stopped
+    networks:
+      - roza-net
+    environment:
+      # SIP trunk credentials are consumed by the templated Asterisk config
+      # (docker/asterisk/*.conf) via env interpolation — never committed as
+      # literal secret values. Same ${VAR} names as the Node service.
+      SIP_HOST: ${SIP_HOST:-asterisk}
+      SIP_PORT: ${SIP_PORT:-}
+      SIP_USER: ${SIP_USER:-}
+      SIP_PASSWORD: ${SIP_PASSWORD:-}
+      SIP_REALM: ${SIP_REALM:-}
+    volumes:
+      # Templated Asterisk configuration (ari.conf, http.conf, pjsip.conf,
+      # extensions.conf) added in a later task. Secrets are drawn from the
+      # SIP_* env vars above; no secret value is committed to these files.
+      - ./docker/asterisk:/etc/asterisk
+    ports:
+      # SIP signalling — published to the host so external SIP peers / the
+      # SIP trunk can reach the gateway.
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      # RTP media port range for live call audio (AudioSocket/External-Media).
+      - "10000-10100:10000-10100/udp"
+    # NOTE: the ARI HTTP/WebSocket control plane (default port 8088) is
+    # intentionally NOT published to the host. roza-agent reaches it only over
+    # the internal `roza-net` network at http://asterisk:8088.
+
+networks:
+  # Internal bridge network shared by roza-agent and asterisk. Service-to-service
+  # traffic (ARI control + AudioSocket media) stays on this network; only the
+  # SIP/RTP ports above are exposed to the host.
+  roza-net:
+    driver: bridge

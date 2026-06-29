@@ -19,6 +19,31 @@ const DEFAULT_TIMEZONE = 'Africa/Kinshasa';
 /** Default encryption key identifier recorded with each journal entry. */
 const DEFAULT_KEY_VERSION = 'v1';
 
+/** Default TTS engine (Phase 3, Req 2.3, 3.1) — Piper (MIT, commercial-safe). */
+const DEFAULT_TTS_ENGINE = 'piper';
+/** Default Piper voice id when `TTS_VOICE` is not provided. */
+const DEFAULT_TTS_VOICE = 'en_US-amy-medium';
+/** Default Piper model id when `TTS_MODEL` is not provided. */
+const DEFAULT_TTS_MODEL = 'en_US-amy-medium';
+/** Default STT engine (Phase 3, Req 3.1) — whisper.cpp (MIT, commercial-safe). */
+const DEFAULT_STT_ENGINE = 'whisper.cpp';
+/** Default whisper.cpp ggml model id when `STT_MODEL` is not provided. */
+const DEFAULT_STT_MODEL = 'ggml-base.en';
+/** Default maximum reply length handed to TTS (Phase 3, Req 2.5). */
+const DEFAULT_MAX_REPLY_CHARS = 1000;
+/** Default time-to-first-audio bound for TTS, in ms (Phase 3, Req 12.1, 12.2). */
+const DEFAULT_TTS_LATENCY_MS = 5000;
+/** Default transcription bound for STT, in ms (Phase 3, Req 12.1, 12.2). */
+const DEFAULT_STT_LATENCY_MS = 5000;
+/** Default end-to-end voice response bound, in ms (Phase 3, Req 12.1, 12.2). */
+const DEFAULT_VOICE_RESPONSE_LATENCY_MS = 8000;
+/** Default ring timeout for outbound origination, in ms (Phase 3, Req 5.4). */
+const DEFAULT_VOICE_RING_TIMEOUT_MS = 30000;
+/** Default inbound no-allowlist access policy (Phase 3, Req 10.6). */
+const DEFAULT_VOICE_ACCESS: VoiceDefaultAccess = 'reject';
+/** Default inbound quiet-hours policy (Phase 3, Req 8.3). */
+const DEFAULT_QUIET_HOURS_INBOUND: QuietHoursInboundPolicy = 'take_message';
+
 /** Minutes in a single day; HH:MM values resolve to `[0, 1439]`. */
 const MINUTES_PER_DAY = 24 * 60;
 
@@ -65,6 +90,55 @@ export interface MailChannelConfig {
 }
 
 /**
+ * Inbound quiet-hours policy (Phase 3, Req 8.3). When a call arrives during
+ * Quiet_Hours the connector applies exactly this policy: outright `reject`,
+ * `answer_busy`, or `take_message`.
+ */
+export type QuietHoursInboundPolicy = 'reject' | 'answer_busy' | 'take_message';
+
+/**
+ * No-allowlist default access for the voice channel (Phase 3, Req 10.6). When
+ * `VOICE_ALLOWLIST` is empty this decides whether unknown callers are rejected
+ * or allowed.
+ */
+export type VoiceDefaultAccess = 'reject' | 'allow';
+
+/**
+ * Voice channel configuration (Phase 3, Req 1.1, 2.3, 2.5, 7, 8.3, 10, 12).
+ *
+ * `enabled` reflects `VOICE_ENABLED` (default false). The SIP trunk
+ * host/port/user/password/realm are validated non-blank only WHEN the channel
+ * is enabled and are never logged or persisted. `allowlist` is the optional
+ * comma-separated `VOICE_ALLOWLIST`; an enabled channel with an empty allowlist
+ * applies `defaultAccess`. Engine/voice/model and latency settings parse with
+ * documented defaults so an enabled channel always has a complete, tunable
+ * config.
+ */
+export interface VoiceChannelConfig {
+  /** VOICE_ENABLED (default false) — Req 1.1. */
+  enabled: boolean;
+  /** SIP trunk credentials; validated non-blank only when `enabled`. Never logged/persisted (Req 7). */
+  sip: { host: string; port: number; user: string; password: string; realm: string };
+  /**
+   * VOICE_ALLOWLIST: trimmed, non-empty caller identities. An empty array on an
+   * enabled channel applies `defaultAccess` (Req 10.4, 10.6).
+   */
+  allowlist: string[];
+  /** VOICE_DEFAULT_ACCESS for an empty allowlist (default 'reject') — Req 10.6. */
+  defaultAccess: VoiceDefaultAccess;
+  /** VOICE_QUIET_HOURS_INBOUND policy (default 'take_message') — Req 8.3. */
+  quietHoursInbound: QuietHoursInboundPolicy;
+  /** TTS_ENGINE/TTS_VOICE/TTS_MODEL with documented defaults — Req 2.3. */
+  tts: { engine: string; voice: string; model: string };
+  /** STT_ENGINE/STT_MODEL with documented defaults. */
+  stt: { engine: string; model: string };
+  /** TTS_MAX_REPLY_CHARS — synthesis latency contract bound (Req 2.5). */
+  maxReplyChars: number;
+  /** Tunable latency bounds in ms (Req 5.4, 12.1, 12.2). */
+  latency: { ttsMs: number; sttMs: number; endToEndMs: number; ringTimeoutMs: number };
+}
+
+/**
  * Fully-resolved configuration consumed by the rest of the service. Required
  * secrets are guaranteed non-empty once this object exists.
  */
@@ -87,6 +161,8 @@ export interface RozaConfig {
   telegram: TelegramChannelConfig;
   /** Mail channel enablement, credentials, and allowlist (Phase 2, Req 4, 5, 9). */
   mail: MailChannelConfig;
+  /** Voice channel enablement, SIP credentials, allowlist, and engine/latency settings (Phase 3). */
+  voice: VoiceChannelConfig;
 }
 
 /** The two required environment variables (Req 1.7). */
@@ -107,6 +183,13 @@ export type MissingChannelVar =
   | 'MAIL_SMTP_PORT'
   | 'MAIL_SMTP_USER'
   | 'MAIL_SMTP_PASSWORD';
+
+/**
+ * SIP trunk credential environment variables that are required only when the
+ * voice channel is enabled (Phase 3, Req 7.2). Reported by NAME only — the
+ * value is never surfaced.
+ */
+export type MissingVoiceVar = 'SIP_HOST' | 'SIP_PORT' | 'SIP_USER' | 'SIP_PASSWORD' | 'SIP_REALM';
 
 /** Structured configuration error; carries the offending name, never a value. */
 export type ConfigError = { kind: 'ENV_MISSING'; name: MissingVar };
@@ -315,6 +398,112 @@ export function resolveMailConfig(
 }
 
 /**
+ * Pure parse of a positive-integer setting with a documented default (Phase 3).
+ *
+ * Returns the parsed positive integer, or `fallback` when the value is absent
+ * or not a valid positive integer. Total (never throws).
+ */
+function parsePositiveIntOr(raw: string | undefined, fallback: number): number {
+  if (isBlank(raw)) {
+    return fallback;
+  }
+  const n = Number.parseInt((raw as string).trim(), 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Pure parse of `VOICE_DEFAULT_ACCESS` (Phase 3, Req 10.6).
+ *
+ * Returns `'reject'` or `'allow'` for the matching (trimmed, case-insensitive)
+ * value; every other value resolves to the default `'reject'`. Total.
+ */
+function parseVoiceDefaultAccess(raw: string | undefined): VoiceDefaultAccess {
+  const v = raw?.trim().toLowerCase();
+  return v === 'allow' || v === 'reject' ? v : DEFAULT_VOICE_ACCESS;
+}
+
+/**
+ * Pure parse of `VOICE_QUIET_HOURS_INBOUND` (Phase 3, Req 8.3).
+ *
+ * Returns one of `'reject' | 'answer_busy' | 'take_message'` for the matching
+ * (trimmed, case-insensitive) value; every other value resolves to the default
+ * `'take_message'`. Total.
+ */
+function parseQuietHoursInbound(raw: string | undefined): QuietHoursInboundPolicy {
+  const v = raw?.trim().toLowerCase();
+  return v === 'reject' || v === 'answer_busy' || v === 'take_message'
+    ? v
+    : DEFAULT_QUIET_HOURS_INBOUND;
+}
+
+/**
+ * Pure resolution of the Voice channel configuration (Phase 3, Req 1.1, 2.3,
+ * 2.5, 7.1–7.3, 8.3, 10.4, 10.6, 12.1, 12.2).
+ *
+ * When `VOICE_ENABLED` is true, each blank/missing SIP host/port/user/password/
+ * realm variable is reported missing by NAME (in a stable order); `SIP_PORT`
+ * counts as missing unless it parses to a positive integer. When the channel is
+ * disabled, the result is always `ok` with `enabled: false` and no error even
+ * if SIP credentials are absent — the channel stays inert. Engine/voice/model,
+ * latency bounds, `maxReplyChars`, `defaultAccess`, and `quietHoursInbound`
+ * parse with documented defaults so an enabled channel always has a complete,
+ * tunable config. Credential values are never surfaced in the error.
+ */
+export function resolveVoiceConfig(
+  env: NodeJS.ProcessEnv
+): { ok: true; cfg: VoiceChannelConfig } | { ok: false; missing: MissingVoiceVar[] } {
+  const enabled = parseBoolFlag(env.VOICE_ENABLED);
+  const allowlist = parseAllowlist(env.VOICE_ALLOWLIST);
+
+  const cfg: VoiceChannelConfig = {
+    enabled,
+    sip: {
+      host: env.SIP_HOST?.trim() ?? '',
+      port: parsePort(env.SIP_PORT),
+      user: env.SIP_USER?.trim() ?? '',
+      password: env.SIP_PASSWORD ?? '',
+      realm: env.SIP_REALM?.trim() ?? '',
+    },
+    allowlist,
+    defaultAccess: parseVoiceDefaultAccess(env.VOICE_DEFAULT_ACCESS),
+    quietHoursInbound: parseQuietHoursInbound(env.VOICE_QUIET_HOURS_INBOUND),
+    tts: {
+      engine: env.TTS_ENGINE?.trim() || DEFAULT_TTS_ENGINE,
+      voice: env.TTS_VOICE?.trim() || DEFAULT_TTS_VOICE,
+      model: env.TTS_MODEL?.trim() || DEFAULT_TTS_MODEL,
+    },
+    stt: {
+      engine: env.STT_ENGINE?.trim() || DEFAULT_STT_ENGINE,
+      model: env.STT_MODEL?.trim() || DEFAULT_STT_MODEL,
+    },
+    maxReplyChars: parsePositiveIntOr(env.TTS_MAX_REPLY_CHARS, DEFAULT_MAX_REPLY_CHARS),
+    latency: {
+      ttsMs: parsePositiveIntOr(env.TTS_LATENCY_MS, DEFAULT_TTS_LATENCY_MS),
+      sttMs: parsePositiveIntOr(env.STT_LATENCY_MS, DEFAULT_STT_LATENCY_MS),
+      endToEndMs: parsePositiveIntOr(env.VOICE_RESPONSE_LATENCY_MS, DEFAULT_VOICE_RESPONSE_LATENCY_MS),
+      ringTimeoutMs: parsePositiveIntOr(env.VOICE_RING_TIMEOUT_MS, DEFAULT_VOICE_RING_TIMEOUT_MS),
+    },
+  };
+
+  if (!enabled) {
+    return { ok: true, cfg };
+  }
+
+  const missing: MissingVoiceVar[] = [];
+  if (isBlank(env.SIP_HOST)) missing.push('SIP_HOST');
+  if (isPortMissing(env.SIP_PORT)) missing.push('SIP_PORT');
+  if (isBlank(env.SIP_USER)) missing.push('SIP_USER');
+  if (isBlank(env.SIP_PASSWORD)) missing.push('SIP_PASSWORD');
+  if (isBlank(env.SIP_REALM)) missing.push('SIP_REALM');
+
+  if (missing.length > 0) {
+    return { ok: false, missing };
+  }
+
+  return { ok: true, cfg };
+}
+
+/**
  * Imperative startup wrapper (Req 1.7, 2.4, 5.2).
  *
  * Validates required secrets; on failure it logs the variable NAME only (never
@@ -328,6 +517,10 @@ export function resolveMailConfig(
  * and `process.exit(1)`. A DISABLED channel with missing credentials is not an
  * error — it stays inert. An enabled channel with no configured allowlist is the
  * documented allow-all default (Req 9.3).
+ *
+ * Phase 3 (Req 7.2, 7.3): the voice channel follows the identical contract.
+ * When `VOICE_ENABLED` is true and any SIP trunk variable is missing, each is
+ * logged by NAME and `process.exit(1)`; a disabled voice channel stays inert.
  */
 export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
   const required = validateRequiredEnv(env);
@@ -348,12 +541,15 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
 
   // Phase 2: resolve channel enablement + credentials. Only ENABLED channels
   // with missing credentials abort startup; disabled channels stay inert.
+  // Phase 3: the voice channel follows the identical fail-fast contract.
   const telegram = resolveTelegramConfig(env);
   const mail = resolveMailConfig(env);
-  if (!telegram.ok || !mail.ok) {
-    const channelMissing: MissingChannelVar[] = [
+  const voice = resolveVoiceConfig(env);
+  if (!telegram.ok || !mail.ok || !voice.ok) {
+    const channelMissing: (MissingChannelVar | MissingVoiceVar)[] = [
       ...(telegram.ok ? [] : telegram.missing),
       ...(mail.ok ? [] : mail.missing),
+      ...(voice.ok ? [] : voice.missing),
     ];
     for (const name of channelMissing) {
       console.error(
@@ -377,5 +573,7 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
     // Phase 2: both resolvers are `ok` here (the guard above exits otherwise).
     telegram: telegram.cfg,
     mail: mail.cfg,
+    // Phase 3: `voice` is `ok` here (the guard above exits otherwise).
+    voice: voice.cfg,
   };
 }

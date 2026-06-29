@@ -106,8 +106,11 @@ describe('db.phase2 — additive schema creation (Task 2.2, Req 1.4)', () => {
       for (const table of ALL_TABLES) {
         expect(tables.has(table), `${table} should exist`).toBe(true);
       }
-      // Exactly the eight known tables — no more, no fewer.
-      expect(tables.size).toBe(ALL_TABLES.length);
+      // The eight Phase 1 + Phase 2 tables must all be present. Later phases
+      // add further tables additively (e.g. Phase 3's `call_sessions`), so we
+      // assert these eight are a SUBSET of the schema rather than pinning an
+      // exact total count.
+      expect(tables.size).toBeGreaterThanOrEqual(ALL_TABLES.length);
     } finally {
       db.close();
     }

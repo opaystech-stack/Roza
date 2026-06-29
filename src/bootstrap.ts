@@ -66,6 +66,10 @@ import {
 } from './connectors/connector.js';
 import { createTelegramConnector } from './connectors/telegram.js';
 import { createMailConnector } from './connectors/mail.js';
+import { createVoiceConnector, type VoiceConnector } from './connectors/voice/voiceConnector.js';
+import { createAsteriskTelephonyGateway } from './connectors/voice/telephony.asterisk.js';
+import { createWhisperSttEngine, createTurnDetector } from './connectors/voice/stt.whisper.js';
+import { createPiperTtsEngine } from './connectors/voice/tts.piper.js';
 import type { Logger } from './types.js';
 
 /**
@@ -94,6 +98,16 @@ export interface RozaHandle {
   router: InboundRouter;
   /** Connectors that started successfully, keyed by operative channel (Req 5.4, 12.6). */
   connectors: Map<OperativeChannel, ChannelConnector>;
+  /**
+   * The Voice_Connector — present ONLY when the voice channel is enabled and the
+   * connector was constructed (Phase 3). It is NOT a {@link ChannelConnector}
+   * and has its own interface, so it lives outside the `connectors` Map. The
+   * constructed connector is included in the handle once built; its fire-and-
+   * forget `start()` is fault-isolated, so a later async startup rejection is
+   * logged and the channel skipped without removing it from the handle
+   * (Req 9.5, 12.6).
+   */
+  voice?: VoiceConnector;
   /** Mutable profile holder enabling restart-free profile edits (Req 2.4). */
   profileHolder: ProfileHolder;
 }
@@ -120,6 +134,14 @@ export interface BootstrapDeps {
   createTelegram?: typeof createTelegramConnector;
   /** Build the Mail connector (real imapflow/nodemailer transports by default). Default {@link createMailConnector}. */
   createMail?: typeof createMailConnector;
+  /** Build the Voice_Connector (real adapters by default). Default {@link createVoiceConnector}. */
+  createVoice?: typeof createVoiceConnector;
+  /** Build the Asterisk telephony gateway (real ARI transport by default). Default {@link createAsteriskTelephonyGateway}. */
+  createTelephonyGateway?: typeof createAsteriskTelephonyGateway;
+  /** Build the whisper.cpp STT engine (real native binary by default). Default {@link createWhisperSttEngine}. */
+  createSttEngine?: typeof createWhisperSttEngine;
+  /** Build the Piper TTS engine (real native binary by default). Default {@link createPiperTtsEngine}. */
+  createTtsEngine?: typeof createPiperTtsEngine;
   /** Register the 30-minute cron scheduler. Default {@link initScheduler}. */
   initScheduler?: typeof initScheduler;
   /** OpenRouter chat-completion client passed to the engine. Default {@link chatCompletion}. */
@@ -205,6 +227,40 @@ function startConnectorIsolated(
 }
 
 /**
+ * Start the Voice_Connector with fault isolation (Req 9.5, 12.6).
+ *
+ * The Voice_Connector is NOT a {@link ChannelConnector} (it has its own
+ * interface and does not live in the `connectors` Map), so it needs its own
+ * isolation helper that mirrors {@link startConnectorIsolated}. Its `start`
+ * opens telephony I/O (`gateway.listen`) and may throw synchronously (e.g. a
+ * transport factory rejecting an obviously bad credential) or reject
+ * asynchronously (e.g. a SIP/ARI handshake failure). Both are isolated: the
+ * failure is logged via `logger.error` (never a credential value — Req 7.4,
+ * 11.4) and the voice channel is skipped, while the scheduler, the text
+ * connectors, and the always-on `internal` channel all keep running. `start`
+ * itself stays synchronous, so the rejection path is handled with a `.catch`
+ * rather than `await`.
+ */
+function startVoiceIsolated(voice: VoiceConnector, logger: Logger): void {
+  const onFailure = (err: unknown): void => {
+    logger.error('[voice] startup failed; channel skipped (fault-isolated)', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  };
+
+  try {
+    const started = voice.start();
+    // Isolate an asynchronous rejection without blocking the synchronous start().
+    if (started !== undefined && typeof started.then === 'function') {
+      started.catch(onFailure);
+    }
+  } catch (err) {
+    // Isolate a synchronous throw from the voice connector's start.
+    onFailure(err);
+  }
+}
+
+/**
  * Run the fail-fast startup sequence and enter the operational state.
  *
  * Ordering (Req 1.3, 1.2): configuration → database → repository → profile →
@@ -235,6 +291,10 @@ export function start(
   const createRouter = deps.createRouter ?? ((d: InboundRouterDeps): InboundRouter => new InboundRouter(d));
   const createTelegram = deps.createTelegram ?? createTelegramConnector;
   const createMail = deps.createMail ?? createMailConnector;
+  const createVoice = deps.createVoice ?? createVoiceConnector;
+  const createTelephonyGateway = deps.createTelephonyGateway ?? createAsteriskTelephonyGateway;
+  const createSttEngine = deps.createSttEngine ?? createWhisperSttEngine;
+  const createTtsEngine = deps.createTtsEngine ?? createPiperTtsEngine;
   const initSched = deps.initScheduler ?? initScheduler;
   const llm = deps.llm ?? chatCompletion;
   const logger = deps.logger ?? defaultLogger;
@@ -365,8 +425,49 @@ export function start(
     startConnectorIsolated(connector, onInbound, connectors, logger);
   }
 
+  // 10b. Voice channel (Phase 3) — built and started ONLY when enabled. With
+  //      VOICE_ENABLED=false nothing below runs, so startup is byte-for-byte the
+  //      Phase 2 sequence (no gateway/STT/TTS/connector is constructed). When
+  //      enabled, the real Asterisk gateway / whisper STT / Piper TTS adapters
+  //      are constructed (SIP credentials are handed only to the gateway
+  //      transport, never logged — Req 7.4) and injected into the
+  //      Voice_Connector, which is then started FAULT-ISOLATED (Req 9.5, 12.6):
+  //      a synchronous throw or an async rejection on `voice.start()` is logged
+  //      and the voice channel skipped, never aborting the scheduler, the text
+  //      connectors, or the always-on `internal` channel. The constructed
+  //      connector is included in the returned handle even if its async start
+  //      later rejects (the failure is logged); `start` stays synchronous and
+  //      the gateway `listen()` is fire-and-forget like the other connectors.
+  let voice: VoiceConnector | undefined;
+  if (cfg.voice.enabled) {
+    const gateway = createTelephonyGateway({ sip: cfg.voice.sip, logger });
+    const stt = createSttEngine({ logger });
+    const tts = createTtsEngine({ logger });
+    voice = createVoice({
+      gateway,
+      stt,
+      tts,
+      turnDetector: () => createTurnDetector(),
+      engine,
+      cfg,
+      window: cfg.activeWindow,
+      timezone: cfg.timezone,
+      now,
+      logger,
+      repo,
+    });
+    startVoiceIsolated(voice, logger);
+  }
+
   // 11. Operational state — emit the startup-ready entry (Req 1.4).
   logger.info('[roza] roza-agent ready');
 
-  return { cfg, db, repo, engine, scheduler, router, connectors, profileHolder };
+  // The `voice` property is OMITTED entirely when the channel is disabled
+  // (`exactOptionalPropertyTypes`), keeping the disabled-path handle byte-for-
+  // byte the Phase 2 shape; it is present only when built+started.
+  const handle: RozaHandle = { cfg, db, repo, engine, scheduler, router, connectors, profileHolder };
+  if (voice !== undefined) {
+    handle.voice = voice;
+  }
+  return handle;
 }

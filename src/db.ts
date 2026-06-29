@@ -85,6 +85,18 @@ const REQUIRED_TABLES: Record<string, readonly string[]> = {
     'answered_at',
     'sent_at',
   ],
+  // Phase 3 (Req 4.6, 5.4, 7.5, 9.1): additive, audit-only Call_Session log.
+  // Holds no credential — only the Caller_Identity-derived identifiers and outcome.
+  call_sessions: [
+    'id',
+    'user_id',
+    'direction',
+    'caller_identity',
+    'outcome',
+    'started_at',
+    'ended_at',
+    'turns',
+  ],
 };
 
 /** Resolve the absolute path to the Roza_Mind_Database file under `dataDir`. */
@@ -94,12 +106,13 @@ export function resolveDbPath(dataDir: string): string {
 
 /**
  * Create the four canonical tables (Req 3.5–3.8) plus `task_invocations`
- * (Req 2.5) and the three additive Phase 2 tables — `roza_profile` (Req 1.4),
+ * (Req 2.5), the three additive Phase 2 tables — `roza_profile` (Req 1.4),
  * `inbound_queue` (Req 10.2–10.4), and `processed_messages` (Req 11.1, 11.3,
- * 11.5) — inside a single transaction so initialization is all-or-none: if any
- * statement fails, the whole batch rolls back and no partial schema remains
+ * 11.5) — and the additive Phase 3 `call_sessions` audit table (Req 4.6, 5.4,
+ * 7.5, 9.1) inside a single transaction so initialization is all-or-none: if
+ * any statement fails, the whole batch rolls back and no partial schema remains
  * (Req 3.2). Every statement is an idempotent `CREATE TABLE/INDEX IF NOT
- * EXISTS`, so an existing Phase 1 database gains the Phase 2 tables without any
+ * EXISTS`, so an existing Phase 1/2 database gains the later tables without any
  * destructive migration. The DDL carries the CHECK constraints, indexes, and
  * the forward-compatible channel values from the design.
  */
@@ -184,6 +197,22 @@ export function initSchema(db: Database.Database): void {
         sent_at      TEXT,
         PRIMARY KEY (channel, external_id)                 -- one row per external message (Req 11.1–11.3)
       );
+
+      -- call_sessions (Phase 3 — Req 4.6, 5.4, 7.5, 9.1): additive, audit-only Call_Session
+      -- log on the 'voice' channel. Stores NO SIP_Trunk_Credentials value (Req 7.5); only the
+      -- Caller_Identity-derived identifiers, direction, outcome, timestamps, and turn count.
+      CREATE TABLE IF NOT EXISTS call_sessions (
+        id              TEXT PRIMARY KEY,
+        user_id         TEXT NOT NULL,
+        direction       TEXT NOT NULL CHECK (direction IN ('inbound','outbound')),
+        caller_identity TEXT NOT NULL,
+        outcome         TEXT NOT NULL DEFAULT 'in_progress'
+                        CHECK (outcome IN ('in_progress','completed','rejected','no_answer','dropped','error')),
+        started_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        ended_at        TEXT,
+        turns           INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_call_user_time ON call_sessions(user_id, started_at DESC);
     `);
   });
 

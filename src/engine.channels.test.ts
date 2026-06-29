@@ -94,6 +94,17 @@ function makeConfig(overrides?: {
       smtp: { host: '', port: 0, user: '', password: '' },
       allowlist: [],
     },
+    voice: {
+      enabled: false,
+      sip: { host: '', port: 0, user: '', password: '', realm: '' },
+      allowlist: [],
+      defaultAccess: 'reject',
+      quietHoursInbound: 'take_message',
+      tts: { engine: 'piper', voice: 'en_US-amy-medium', model: 'en_US-amy-medium' },
+      stt: { engine: 'whisper.cpp', model: 'ggml-base.en' },
+      maxReplyChars: 1000,
+      latency: { ttsMs: 5000, sttMs: 5000, endToEndMs: 8000, ringTimeoutMs: 30000 },
+    },
   };
 }
 

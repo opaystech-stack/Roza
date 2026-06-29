@@ -75,7 +75,9 @@ export interface CognitiveEngineDeps {
  *
  * `internal` is always operative; `telegram` is operative iff the Telegram
  * channel is enabled; `email` is operative iff the Mail channel is enabled;
- * `voice` is never operative in Phase 2 (Req 15.3).
+ * `voice` is now operative iff `cfg.voice.enabled` (Phase 3, Req 1.4). A
+ * disabled voice channel — and any other non-operative channel — is still
+ * rejected.
  */
 export function operativeChannels(cfg: RozaConfig): Set<Channel> {
   const channels = new Set<Channel>(['internal']);
@@ -84,6 +86,9 @@ export function operativeChannels(cfg: RozaConfig): Set<Channel> {
   }
   if (cfg.mail.enabled) {
     channels.add('email');
+  }
+  if (cfg.voice.enabled) {
+    channels.add('voice');
   }
   return channels;
 }

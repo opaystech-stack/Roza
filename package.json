@@ -17,6 +17,7 @@
     "lint": "oxlint"
   },
   "dependencies": {
+    "ari-client": "^2.2.0",
     "better-sqlite3": "^12.11.1",
     "grammy": "^1.44.0",
     "imapflow": "^1.4.3",
@@ -25,6 +26,7 @@
     "nodemailer": "^9.0.1"
   },
   "devDependencies": {
+    "@types/ari-client": "^2.2.14",
     "@types/better-sqlite3": "^7.6.13",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^24.13.2",

@@ -55,3 +55,42 @@ export function userIdForTelegram(id: string | number): string {
 export function userIdForEmail(address: string): string {
   return `email:${normalizeEmail(address)}`;
 }
+/**
+ * Normalize a Caller_Identity (E.164 phone number or SIP URI) to a stable key.
+ *
+ * If the identity looks like a SIP URI (case-insensitively prefixed with
+ * `sip:` or `sips:`), the scheme is stripped along with any `@host` portion and
+ * any `;`/`?` parameters, then the remaining user part is trimmed and
+ * lowercased. Otherwise the identity is treated as a phone number: spaces,
+ * dashes, parentheses and dots are removed, keeping a single leading `+` (when
+ * present) followed by the digits. Total; never throws (empty input → '')
+ * (Req 10.1, 14.2).
+ */
+export function normalizeCallerIdentity(identity: string): string {
+  const trimmed = identity.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('sip:') || lower.startsWith('sips:')) {
+    const schemeEnd = trimmed.indexOf(':');
+    let userPart = trimmed.slice(schemeEnd + 1);
+    const atIndex = userPart.indexOf('@');
+    if (atIndex !== -1) {
+      userPart = userPart.slice(0, atIndex);
+    }
+    const paramIndex = userPart.search(/[;?]/);
+    if (paramIndex !== -1) {
+      userPart = userPart.slice(0, paramIndex);
+    }
+    return userPart.trim().toLowerCase();
+  }
+  const hasLeadingPlus = trimmed.startsWith('+');
+  const digits = trimmed.replace(/\D/g, '');
+  return hasLeadingPlus ? `+${digits}` : digits;
+}
+
+/**
+ * Deterministic `user_id` for a voice Caller_Identity (Req 10.1, 14.2).
+ * Channel-prefixed so the same raw identity on a different channel never collides.
+ */
+export function userIdForVoice(identity: string): string {
+  return `voice:${normalizeCallerIdentity(identity)}`;
+}

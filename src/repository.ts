@@ -123,6 +123,51 @@ export interface NewInboundQueueRow {
   received_at: string;
 }
 
+/** Direction of a Call_Session on the `voice` channel (Phase 3 — Req 5.4, 9.1). */
+export type CallDirection = 'inbound' | 'outbound';
+
+/**
+ * Lifecycle outcome of a Call_Session (Phase 3 — Req 5.4). A session opens as
+ * `in_progress` and is later closed with a terminal outcome.
+ */
+export type CallOutcome =
+  | 'in_progress'
+  | 'completed'
+  | 'rejected'
+  | 'no_answer'
+  | 'dropped'
+  | 'error';
+
+/**
+ * A `call_sessions` audit row (Phase 3 — Req 4.6, 5.4, 7.5, 9.1). This is an
+ * additive, audit-only log on the `voice` channel: it holds NO
+ * SIP_Trunk_Credentials value (Req 7.5), only the Caller_Identity-derived
+ * identifiers, direction, outcome, timestamps, and a running turn count.
+ */
+export interface CallSession {
+  id: string;
+  user_id: string;
+  direction: CallDirection;
+  caller_identity: string;
+  outcome: CallOutcome;
+  started_at: string;
+  ended_at: string | null;
+  turns: number;
+}
+
+/**
+ * Input for {@link Repository.startCallSession} (Req 5.4, 9.1). The `id` is
+ * assigned by the repository; `outcome` opens as `in_progress` and `turns` at 0.
+ * `callerIdentity` is a Caller_Identity-derived identifier — never a credential.
+ */
+export interface NewCallSession {
+  userId: string;
+  direction: CallDirection;
+  callerIdentity: string;
+  /** Optional explicit start timestamp; defaults to the current ISO-8601 instant. */
+  startedAt?: string;
+}
+
 /** Typed CRUD gateway used by the Cognitive Engine (design Component 4). */
 export interface Repository {
   // Human_Relationships (Req 6.1, 6.5, 6.6, 6.8, 7.3)
@@ -164,6 +209,13 @@ export interface Repository {
     at: string
   ): void;
   markSent(channel: OperativeChannel, externalId: string, at: string): void;
+
+  // Call_Session audit log (Phase 3 — Req 4.6, 5.4, 7.5, 9.1): additive,
+  // audit-only; the voice turn loop never blocks on these writes.
+  startCallSession(input: NewCallSession): CallSession;
+  incrementCallTurn(id: string): void;
+  endCallSession(id: string, outcome: CallOutcome, at: string): void;
+  getCallSession(id: string): CallSession | null;
 
   // Transactions
   tx<T>(fn: () => T): T;
@@ -294,6 +346,24 @@ export function createRepository(
     `UPDATE processed_messages
         SET answer_state = 'answered_sent', sent_at = @sent_at
       WHERE channel = @channel AND external_id = @external_id`
+  );
+
+  // --- Phase 3 prepared statements (Req 4.6, 5.4, 7.5, 9.1) --------------
+
+  const insertCallSession = db.prepare(
+    `INSERT INTO call_sessions
+       (id, user_id, direction, caller_identity, outcome, started_at, ended_at, turns)
+     VALUES
+       (@id, @user_id, @direction, @caller_identity, 'in_progress', @started_at, NULL, 0)`
+  );
+  const selectCallSessionById = db.prepare(
+    'SELECT * FROM call_sessions WHERE id = ?'
+  );
+  const incrementCallTurnStmt = db.prepare(
+    'UPDATE call_sessions SET turns = turns + 1 WHERE id = ?'
+  );
+  const updateCallSessionEnd = db.prepare(
+    'UPDATE call_sessions SET outcome = @outcome, ended_at = @ended_at WHERE id = @id'
   );
 
   // --- Human_Relationships ----------------------------------------------
@@ -513,6 +583,38 @@ export function createRepository(
     updateSent.run({ channel, external_id: externalId, sent_at: at });
   }
 
+  // --- Call_Session audit log (Phase 3 — Req 4.6, 5.4, 7.5, 9.1) ---------
+
+  function startCallSession(input: NewCallSession): CallSession {
+    // Req 5.4, 9.1: open an audit-only voice Call_Session as `in_progress` with
+    // a fresh UUID and zero turns. Stores only the Caller_Identity-derived
+    // identifier — never a SIP_Trunk_Credentials value (Req 7.5).
+    const id = randomUUID();
+    insertCallSession.run({
+      id,
+      user_id: input.userId,
+      direction: input.direction,
+      caller_identity: input.callerIdentity,
+      started_at: input.startedAt ?? isoNow(),
+    });
+    return selectCallSessionById.get(id) as CallSession;
+  }
+
+  function incrementCallTurn(id: string): void {
+    // Audit-only running turn count; the voice turn loop never blocks on this.
+    incrementCallTurnStmt.run(id);
+  }
+
+  function endCallSession(id: string, outcome: CallOutcome, at: string): void {
+    // Req 5.4: close the session with a terminal outcome and ended_at stamp.
+    updateCallSessionEnd.run({ id, outcome, ended_at: at });
+  }
+
+  function getCallSession(id: string): CallSession | null {
+    const row = selectCallSessionById.get(id) as CallSession | undefined;
+    return row ?? null;
+  }
+
   // --- Transactions ------------------------------------------------------
 
   function tx<T>(fn: () => T): T {
@@ -541,6 +643,10 @@ export function createRepository(
     getProcessed,
     recordAnswered,
     markSent,
+    startCallSession,
+    incrementCallTurn,
+    endCallSession,
+    getCallSession,
     tx,
   };
 }
