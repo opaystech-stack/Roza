@@ -64,6 +64,27 @@ const REQUIRED_TABLES: Record<string, readonly string[]> = {
   conversations: ['id', 'channel', 'user_id', 'created_at', 'last_message_at'],
   messages: ['id', 'conversation_id', 'sender_type', 'content', 'created_at'],
   task_invocations: ['id', 'invoked_at'],
+  // Phase 2 (Req 1.4, 10.2, 10.4, 11.1, 11.3, 11.5): profile, durable inbound queue,
+  // and idempotency/unsent-reply store — all additive to the Phase 1 schema.
+  roza_profile: ['id', 'profile_json', 'updated_at'],
+  inbound_queue: [
+    'id',
+    'channel',
+    'external_id',
+    'sender_id',
+    'text',
+    'thread_ref',
+    'received_at',
+    'seq',
+  ],
+  processed_messages: [
+    'channel',
+    'external_id',
+    'answer_state',
+    'reply_text',
+    'answered_at',
+    'sent_at',
+  ],
 };
 
 /** Resolve the absolute path to the Roza_Mind_Database file under `dataDir`. */
@@ -73,10 +94,14 @@ export function resolveDbPath(dataDir: string): string {
 
 /**
  * Create the four canonical tables (Req 3.5–3.8) plus `task_invocations`
- * (Req 2.5) inside a single transaction so initialization is all-or-none: if
- * any statement fails, the whole batch rolls back and no partial schema
- * remains (Req 3.2). The DDL carries the CHECK constraints, indexes, and the
- * forward-compatible channel values from the design.
+ * (Req 2.5) and the three additive Phase 2 tables — `roza_profile` (Req 1.4),
+ * `inbound_queue` (Req 10.2–10.4), and `processed_messages` (Req 11.1, 11.3,
+ * 11.5) — inside a single transaction so initialization is all-or-none: if any
+ * statement fails, the whole batch rolls back and no partial schema remains
+ * (Req 3.2). Every statement is an idempotent `CREATE TABLE/INDEX IF NOT
+ * EXISTS`, so an existing Phase 1 database gains the Phase 2 tables without any
+ * destructive migration. The DDL carries the CHECK constraints, indexes, and
+ * the forward-compatible channel values from the design.
  */
 export function initSchema(db: Database.Database): void {
   const create = db.transaction(() => {
@@ -127,6 +152,37 @@ export function initSchema(db: Database.Database): void {
       CREATE TABLE IF NOT EXISTS task_invocations (
         id          TEXT PRIMARY KEY,
         invoked_at  TEXT NOT NULL                       -- timestamp in configured timezone
+      );
+
+      -- roza_profile (Req 1.3, 1.4, 2.2): single-row identity store, text-only (no credentials)
+      CREATE TABLE IF NOT EXISTS roza_profile (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),  -- enforce a single row
+        profile_json TEXT NOT NULL,                       -- validated RozaProfile JSON
+        updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      -- inbound_queue (Req 10.2–10.4): durable defer store, drained FIFO on Active_Window entry
+      CREATE TABLE IF NOT EXISTS inbound_queue (
+        id          TEXT PRIMARY KEY,                     -- UUID
+        channel     TEXT NOT NULL CHECK (channel IN ('telegram','email')),
+        external_id TEXT NOT NULL,
+        sender_id   TEXT NOT NULL,
+        text        TEXT NOT NULL,
+        thread_ref  TEXT,
+        received_at TEXT NOT NULL,                         -- ISO-8601; primary FIFO key
+        seq         INTEGER NOT NULL                       -- AUTOINCREMENT-like tiebreak for identical instants
+      );
+      CREATE INDEX IF NOT EXISTS idx_inbound_order ON inbound_queue(received_at, seq);
+
+      -- processed_messages (Req 11): idempotency + unsent-reply retention, keyed by (channel, external_id)
+      CREATE TABLE IF NOT EXISTS processed_messages (
+        channel      TEXT NOT NULL CHECK (channel IN ('telegram','email')),
+        external_id  TEXT NOT NULL,
+        answer_state TEXT NOT NULL CHECK (answer_state IN ('answered_unsent','answered_sent')),
+        reply_text   TEXT,                                 -- retained until successfully sent (Req 11.5)
+        answered_at  TEXT NOT NULL,
+        sent_at      TEXT,
+        PRIMARY KEY (channel, external_id)                 -- one row per external message (Req 11.1–11.3)
       );
     `);
   });

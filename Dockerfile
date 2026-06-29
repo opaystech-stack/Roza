@@ -49,6 +49,11 @@ RUN apt-get update && \
 # Copy compiled JavaScript from the builder stage.
 COPY --from=builder /app/dist ./dist
 
+# Copy committed runtime assets (e.g. assets/roza-avatar.png referenced by the
+# Roza_Profile). These are static files, not compiled, so they ship verbatim
+# from the builder stage into the runtime image at /app/assets.
+COPY --from=builder /app/assets ./assets
+
 # Create the durable data directory (volume mount target for roza_mind.sqlite).
 RUN mkdir -p /app/data
 VOLUME ["/app/data"]

@@ -11,6 +11,7 @@ import { createRepository, type Repository } from './repository.js';
 import { CognitiveEngine, nextAffinity } from './engine.js';
 import { extractTaughtTerms, type Lang } from './language.js';
 import { MAX_PROMPT_TAUGHT_TERMS } from './prompt.js';
+import { DEFAULT_PROFILE } from './profile.js';
 import type { ChatMessage, LlmResult } from './llm.js';
 import type { Channel, HumanRelationship, Logger } from './types.js';
 import type { RozaConfig } from './config.js';
@@ -79,6 +80,14 @@ function makeConfig(overrides?: Partial<RozaConfig>): RozaConfig {
     timezone: 'Africa/Kinshasa',
     activeWindow: { startMinutes: 420, endMinutes: 1320 },
     keyVersion: 'v1',
+    // Phase 2 channels default to disabled (no credentials required).
+    telegram: { enabled: false, botToken: '', allowlist: [] },
+    mail: {
+      enabled: false,
+      imap: { host: '', port: 0, user: '', password: '' },
+      smtp: { host: '', port: 0, user: '', password: '' },
+      allowlist: [],
+    },
     ...overrides,
   };
 }
@@ -105,7 +114,7 @@ function makeFailLlm(reason = 'network error'): { llm: LlmFn; calls: ChatMessage
 
 /** Construct an engine over the shared repo with the supplied llm + config. */
 function makeEngine(llm: LlmFn, cfg: RozaConfig = makeConfig()): CognitiveEngine {
-  return new CognitiveEngine({ repo, llm, cfg, now, logger });
+  return new CognitiveEngine({ repo, llm, cfg, now, logger, profile: () => DEFAULT_PROFILE });
 }
 
 /** A unique user id per iteration (avoids the unique index on user_id). */

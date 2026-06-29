@@ -7,6 +7,7 @@ import {
   type PromptContext,
 } from './prompt.js';
 import { SYSTEM_PROMPT } from './persona.js';
+import { DEFAULT_PROFILE } from './profile.js';
 import type { HumanRelationship, Message } from './types.js';
 import type { Lang, TaughtTerm } from './language.js';
 
@@ -64,6 +65,7 @@ const taughtTermsArb: fc.Arbitrary<TaughtTerm[]> = fc.uniqueArray(
 );
 
 const contextArb: fc.Arbitrary<PromptContext> = fc.record({
+  profile: fc.constant(DEFAULT_PROFILE),
   relationship: relationshipArb,
   recentMessages: recentMessagesArb,
   taughtTerms: taughtTermsArb,

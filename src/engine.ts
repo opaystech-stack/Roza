@@ -25,6 +25,7 @@ import type { Channel, HumanRelationship, Logger } from './types.js';
 import type { Repository } from './repository.js';
 import type { RozaConfig } from './config.js';
 import type { chatCompletion } from './llm.js';
+import type { RozaProfile } from './profile.js';
 import {
   appendTaughtTerm,
   detectLanguage,
@@ -61,6 +62,47 @@ export interface CognitiveEngineDeps {
   cfg: RozaConfig;
   now: () => Date;
   logger: Logger;
+  /**
+   * Live Roza_Profile accessor (Phase 2, Req 3.1, 2.4). The engine calls this
+   * on every message so a profile edit applied to the holder takes effect on
+   * subsequent prompts without a restart.
+   */
+  profile: () => RozaProfile;
+}
+
+/**
+ * Pure: the set of operative channels given the configuration (Req 5.1, 5.5, 15.1).
+ *
+ * `internal` is always operative; `telegram` is operative iff the Telegram
+ * channel is enabled; `email` is operative iff the Mail channel is enabled;
+ * `voice` is never operative in Phase 2 (Req 15.3).
+ */
+export function operativeChannels(cfg: RozaConfig): Set<Channel> {
+  const channels = new Set<Channel>(['internal']);
+  if (cfg.telegram.enabled) {
+    channels.add('telegram');
+  }
+  if (cfg.mail.enabled) {
+    channels.add('email');
+  }
+  return channels;
+}
+
+/** Outcome of classifying a channel request (Req 5.2, 5.3, 15.3). */
+export type ChannelDecision = { ok: true } | { ok: false; reason: 'channel_not_operative' };
+
+/**
+ * Pure: classify a channel request against the operative set (Req 5.2, 5.3, 15.3).
+ *
+ * Returns `{ ok: true }` for an operative channel, and
+ * `{ ok: false, reason: 'channel_not_operative' }` for a disabled `telegram`/
+ * `email` channel or the always-rejected `voice` channel.
+ */
+export function decideChannel(channel: Channel, cfg: RozaConfig): ChannelDecision {
+  if (operativeChannels(cfg).has(channel)) {
+    return { ok: true };
+  }
+  return { ok: false, reason: 'channel_not_operative' };
 }
 
 /** Smallest affinity nudge applied per interaction (ambiguous message). */
@@ -104,6 +146,7 @@ export class CognitiveEngine {
   private readonly cfg: RozaConfig;
   private readonly now: () => Date;
   private readonly logger: Logger;
+  private readonly profile: () => RozaProfile;
 
   constructor(deps: CognitiveEngineDeps) {
     this.repo = deps.repo;
@@ -111,6 +154,7 @@ export class CognitiveEngine {
     this.cfg = deps.cfg;
     this.now = deps.now;
     this.logger = deps.logger;
+    this.profile = deps.profile;
   }
 
   /**
@@ -125,9 +169,11 @@ export class CognitiveEngine {
   async handleMessage(input: HandleMessageInput): Promise<HandleMessageResult> {
     const { userId, channel, text } = input;
 
-    // Phase-1 scope boundary: only `internal` is operative; any other channel
-    // is rejected and causes no mutation (Req 9.3).
-    if (channel !== 'internal') {
+    // Operative-channel gate (Phase 2, Req 5.2, 5.3, 15.3): `internal` is
+    // always operative, `telegram`/`email` iff enabled, `voice` never. A
+    // non-operative channel is rejected and causes no mutation.
+    const decision = decideChannel(channel, this.cfg);
+    if (!decision.ok) {
       this.logger.error('Rejected message on non-operative channel', { channel });
       return { ok: false, reason: 'channel_not_operative' };
     }
@@ -145,11 +191,11 @@ export class CognitiveEngine {
       this.repo.getRelationshipByUserId(userId) ??
       this.repo.createRelationship({ userId });
 
-    // 2. RESOLVE the conversation on the internal channel, creating it if needed
-    //    (Req 6.9).
+    // 2. RESOLVE the conversation on the originating channel, creating it if
+    //    needed (Req 6.9, 6.4, 7.4, 8.6).
     const conv =
-      this.repo.getOpenConversation(userId, 'internal') ??
-      this.repo.createConversation(userId, 'internal');
+      this.repo.getOpenConversation(userId, channel) ??
+      this.repo.createConversation(userId, channel);
 
     // 3. RETRIEVE the 20 most recent messages, newest-first (Req 6.2).
     const recent = this.repo.getRecentMessages(conv.id, MAX_PROMPT_MESSAGES);
@@ -169,6 +215,7 @@ export class CognitiveEngine {
     const terms = extractTaughtTerms(rel.personality_notes, MAX_PROMPT_TAUGHT_TERMS);
     const messages = buildMessages(
       {
+        profile: this.profile(),
         relationship: rel,
         recentMessages: [...recent].reverse(),
         taughtTerms: terms,

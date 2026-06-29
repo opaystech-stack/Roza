@@ -23,6 +23,48 @@ const DEFAULT_KEY_VERSION = 'v1';
 const MINUTES_PER_DAY = 24 * 60;
 
 /**
+ * Telegram channel configuration (Phase 2, Req 4, 5, 9, 13).
+ *
+ * `enabled` reflects `TELEGRAM_ENABLED` (default false). `botToken` is the
+ * secret `TELEGRAM_BOT_TOKEN`, validated non-blank only WHEN the channel is
+ * enabled. `allowlist` is the optional comma-separated `TELEGRAM_ALLOWLIST`;
+ * an enabled channel with an empty allowlist is documented allow-all.
+ */
+export interface TelegramChannelConfig {
+  /** TELEGRAM_ENABLED (default false). */
+  enabled: boolean;
+  /** TELEGRAM_BOT_TOKEN; validated non-blank only when `enabled`. Never logged. */
+  botToken: string;
+  /**
+   * TELEGRAM_ALLOWLIST: trimmed, non-empty chat/user ids. An empty array on an
+   * enabled channel means allow-all (documented default — Req 9.3).
+   */
+  allowlist: string[];
+}
+
+/**
+ * Mail channel configuration (Phase 2, Req 4, 5, 7, 9, 13).
+ *
+ * `enabled` reflects `MAIL_ENABLED` (default false). The IMAP (read) and SMTP
+ * (send) host/port/user/password are validated non-blank only WHEN the channel
+ * is enabled. `allowlist` is the optional comma-separated `MAIL_ALLOWLIST`; an
+ * enabled channel with an empty allowlist is documented allow-all.
+ */
+export interface MailChannelConfig {
+  /** MAIL_ENABLED (default false). */
+  enabled: boolean;
+  /** IMAP read credentials; validated non-blank only when `enabled`. Never logged. */
+  imap: { host: string; port: number; user: string; password: string };
+  /** SMTP send credentials; validated non-blank only when `enabled`. Never logged. */
+  smtp: { host: string; port: number; user: string; password: string };
+  /**
+   * MAIL_ALLOWLIST: trimmed, non-empty email addresses. An empty array on an
+   * enabled channel means allow-all (documented default — Req 9.3).
+   */
+  allowlist: string[];
+}
+
+/**
  * Fully-resolved configuration consumed by the rest of the service. Required
  * secrets are guaranteed non-empty once this object exists.
  */
@@ -41,10 +83,30 @@ export interface RozaConfig {
   activeWindow: ActiveWindow;
   /** Encryption key identifier; defaults to `v1`. */
   keyVersion: string;
+  /** Telegram channel enablement, credentials, and allowlist (Phase 2, Req 4, 5, 9). */
+  telegram: TelegramChannelConfig;
+  /** Mail channel enablement, credentials, and allowlist (Phase 2, Req 4, 5, 9). */
+  mail: MailChannelConfig;
 }
 
 /** The two required environment variables (Req 1.7). */
 export type MissingVar = 'ROZA_PRIVATE_KEY' | 'OPENROUTER_API_KEY';
+
+/**
+ * Per-channel credential environment variables that are required only when
+ * their owning channel is enabled (Phase 2, Req 4.2, 4.3). Reported by NAME
+ * only — the value is never surfaced.
+ */
+export type MissingChannelVar =
+  | 'TELEGRAM_BOT_TOKEN'
+  | 'MAIL_IMAP_HOST'
+  | 'MAIL_IMAP_PORT'
+  | 'MAIL_IMAP_USER'
+  | 'MAIL_IMAP_PASSWORD'
+  | 'MAIL_SMTP_HOST'
+  | 'MAIL_SMTP_PORT'
+  | 'MAIL_SMTP_USER'
+  | 'MAIL_SMTP_PASSWORD';
 
 /** Structured configuration error; carries the offending name, never a value. */
 export type ConfigError = { kind: 'ENV_MISSING'; name: MissingVar };
@@ -119,6 +181,139 @@ export function resolveActiveWindow(
   return { window: { startMinutes, endMinutes }, usedDefault: false };
 }
 
+/** True when a raw env value is undefined, empty, or whitespace-only. */
+function isBlank(raw: string | undefined): boolean {
+  return raw === undefined || raw.trim().length === 0;
+}
+
+/**
+ * Pure parse of a comma-separated allowlist (Phase 2, Req 9.1, 9.3).
+ *
+ * Splits on commas, trims each entry, and drops empty entries. An undefined or
+ * blank input yields an empty array. The result preserves input order and is
+ * total (never throws).
+ */
+export function parseAllowlist(raw: string | undefined): string[] {
+  if (raw === undefined) {
+    return [];
+  }
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+/**
+ * Pure parse of a `*_ENABLED` boolean flag (Phase 2, Req 5.1).
+ *
+ * Returns `true` only for the literal (case-insensitive, trimmed) value
+ * `"true"`. Every other value — including `"false"`, garbage, empty, and
+ * undefined — resolves to the default `false`. Total (never throws).
+ */
+export function parseBoolFlag(raw: string | undefined): boolean {
+  return raw !== undefined && raw.trim().toLowerCase() === 'true';
+}
+
+/**
+ * Pure parse of a TCP port (Phase 2, Req 4.3).
+ *
+ * Returns the parsed positive integer, or `0` when the value is absent or not
+ * a valid positive integer. Total (never throws).
+ */
+function parsePort(raw: string | undefined): number {
+  if (isBlank(raw)) {
+    return 0;
+  }
+  const n = Number.parseInt((raw as string).trim(), 10);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+/** True when a port env value is missing or not a valid positive integer. */
+function isPortMissing(raw: string | undefined): boolean {
+  return parsePort(raw) === 0;
+}
+
+/**
+ * Pure resolution of the Telegram channel configuration (Phase 2, Req 4.2, 5.1, 9).
+ *
+ * When `TELEGRAM_ENABLED` is true and `TELEGRAM_BOT_TOKEN` is blank/whitespace/
+ * undefined, the token is reported missing by NAME. When the channel is
+ * disabled, the result is always `ok` with `enabled: false` and no error even
+ * if the token is absent. The bot token value is never surfaced in the error.
+ */
+export function resolveTelegramConfig(
+  env: NodeJS.ProcessEnv
+): { ok: true; cfg: TelegramChannelConfig } | { ok: false; missing: MissingChannelVar[] } {
+  const enabled = parseBoolFlag(env.TELEGRAM_ENABLED);
+  const allowlist = parseAllowlist(env.TELEGRAM_ALLOWLIST);
+
+  if (enabled && isBlank(env.TELEGRAM_BOT_TOKEN)) {
+    return { ok: false, missing: ['TELEGRAM_BOT_TOKEN'] };
+  }
+
+  return {
+    ok: true,
+    cfg: {
+      enabled,
+      botToken: env.TELEGRAM_BOT_TOKEN?.trim() ?? '',
+      allowlist,
+    },
+  };
+}
+
+/**
+ * Pure resolution of the Mail channel configuration (Phase 2, Req 4.3, 5.1, 9).
+ *
+ * When `MAIL_ENABLED` is true, each blank/missing IMAP and SMTP host/port/user/
+ * password variable is reported missing by NAME (in a stable order). Ports are
+ * parsed as numbers. When the channel is disabled, the result is always `ok`
+ * with `enabled: false` and no error even if credentials are absent. Credential
+ * values are never surfaced in the error.
+ */
+export function resolveMailConfig(
+  env: NodeJS.ProcessEnv
+): { ok: true; cfg: MailChannelConfig } | { ok: false; missing: MissingChannelVar[] } {
+  const enabled = parseBoolFlag(env.MAIL_ENABLED);
+  const allowlist = parseAllowlist(env.MAIL_ALLOWLIST);
+
+  const cfg: MailChannelConfig = {
+    enabled,
+    imap: {
+      host: env.MAIL_IMAP_HOST?.trim() ?? '',
+      port: parsePort(env.MAIL_IMAP_PORT),
+      user: env.MAIL_IMAP_USER?.trim() ?? '',
+      password: env.MAIL_IMAP_PASSWORD ?? '',
+    },
+    smtp: {
+      host: env.MAIL_SMTP_HOST?.trim() ?? '',
+      port: parsePort(env.MAIL_SMTP_PORT),
+      user: env.MAIL_SMTP_USER?.trim() ?? '',
+      password: env.MAIL_SMTP_PASSWORD ?? '',
+    },
+    allowlist,
+  };
+
+  if (!enabled) {
+    return { ok: true, cfg };
+  }
+
+  const missing: MissingChannelVar[] = [];
+  if (isBlank(env.MAIL_IMAP_HOST)) missing.push('MAIL_IMAP_HOST');
+  if (isPortMissing(env.MAIL_IMAP_PORT)) missing.push('MAIL_IMAP_PORT');
+  if (isBlank(env.MAIL_IMAP_USER)) missing.push('MAIL_IMAP_USER');
+  if (isBlank(env.MAIL_IMAP_PASSWORD)) missing.push('MAIL_IMAP_PASSWORD');
+  if (isBlank(env.MAIL_SMTP_HOST)) missing.push('MAIL_SMTP_HOST');
+  if (isPortMissing(env.MAIL_SMTP_PORT)) missing.push('MAIL_SMTP_PORT');
+  if (isBlank(env.MAIL_SMTP_USER)) missing.push('MAIL_SMTP_USER');
+  if (isBlank(env.MAIL_SMTP_PASSWORD)) missing.push('MAIL_SMTP_PASSWORD');
+
+  if (missing.length > 0) {
+    return { ok: false, missing };
+  }
+
+  return { ok: true, cfg };
+}
+
 /**
  * Imperative startup wrapper (Req 1.7, 2.4, 5.2).
  *
@@ -126,6 +321,13 @@ export function resolveActiveWindow(
  * the value) and calls `process.exit(1)` so the service never reaches an
  * operational state without its prerequisites. When the Active_Window
  * configuration is invalid it emits an error log and falls back to defaults.
+ *
+ * Phase 2 (Req 4.2, 4.3, 5.1): after the Phase 1 checks it resolves the
+ * Telegram and Mail channels. For each ENABLED channel with one or more missing
+ * credential variables, it logs each missing variable by NAME (never its value)
+ * and `process.exit(1)`. A DISABLED channel with missing credentials is not an
+ * error — it stays inert. An enabled channel with no configured allowlist is the
+ * documented allow-all default (Req 9.3).
  */
 export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
   const required = validateRequiredEnv(env);
@@ -144,6 +346,23 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
     );
   }
 
+  // Phase 2: resolve channel enablement + credentials. Only ENABLED channels
+  // with missing credentials abort startup; disabled channels stay inert.
+  const telegram = resolveTelegramConfig(env);
+  const mail = resolveMailConfig(env);
+  if (!telegram.ok || !mail.ok) {
+    const channelMissing: MissingChannelVar[] = [
+      ...(telegram.ok ? [] : telegram.missing),
+      ...(mail.ok ? [] : mail.missing),
+    ];
+    for (const name of channelMissing) {
+      console.error(
+        `[config] Startup aborted: required environment variable ${name} is missing or empty.`
+      );
+    }
+    process.exit(1);
+  }
+
   return {
     // Non-null assertions are safe: validateRequiredEnv guarantees presence.
     rozaPrivateKey: env.ROZA_PRIVATE_KEY!.trim(),
@@ -155,5 +374,8 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
     timezone: env.ROZA_TIMEZONE?.trim() || env.TIMEZONE?.trim() || DEFAULT_TIMEZONE,
     activeWindow: window,
     keyVersion: env.ROZA_KEY_VERSION?.trim() || env.KEY_VERSION?.trim() || DEFAULT_KEY_VERSION,
+    // Phase 2: both resolvers are `ok` here (the guard above exits otherwise).
+    telegram: telegram.cfg,
+    mail: mail.cfg,
   };
 }

@@ -18,12 +18,18 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
-    "node-cron": "^3.0.3"
+    "grammy": "^1.44.0",
+    "imapflow": "^1.4.3",
+    "mailparser": "^3.9.12",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^9.0.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^24.13.2",
     "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^8.0.1",
     "fast-check": "^3.23.2",
     "oxlint": "^1.69.0",
     "tsx": "^4.22.4",

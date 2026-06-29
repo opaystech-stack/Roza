@@ -42,6 +42,28 @@ services:
 
       # --- Optional: journal encryption key version label (default: v1) ---
       ROZA_KEY_VERSION: ${ROZA_KEY_VERSION:-}
+
+      # --- Phase 2: Telegram channel (free Bot API via grammY) ---
+      #     TELEGRAM_ENABLED defaults to false; the bot token is required only
+      #     when the channel is enabled and is NEVER hardcoded here.
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWLIST: ${TELEGRAM_ALLOWLIST:-}
+
+      # --- Phase 2: Mail channel (open IMAP read + SMTP send) ---
+      #     MAIL_ENABLED defaults to false; IMAP/SMTP host/port/user/password
+      #     are required only when the channel is enabled. Secrets are injected
+      #     via ${VAR} interpolation and NEVER hardcoded here.
+      MAIL_ENABLED: ${MAIL_ENABLED:-false}
+      MAIL_IMAP_HOST: ${MAIL_IMAP_HOST:-}
+      MAIL_IMAP_PORT: ${MAIL_IMAP_PORT:-}
+      MAIL_IMAP_USER: ${MAIL_IMAP_USER:-}
+      MAIL_IMAP_PASSWORD: ${MAIL_IMAP_PASSWORD:-}
+      MAIL_SMTP_HOST: ${MAIL_SMTP_HOST:-}
+      MAIL_SMTP_PORT: ${MAIL_SMTP_PORT:-}
+      MAIL_SMTP_USER: ${MAIL_SMTP_USER:-}
+      MAIL_SMTP_PASSWORD: ${MAIL_SMTP_PASSWORD:-}
+      MAIL_ALLOWLIST: ${MAIL_ALLOWLIST:-}
     volumes:
       # Durable volume: persists roza_mind.sqlite across container restarts.
       - ./data:/app/data

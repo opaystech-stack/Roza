@@ -5,6 +5,9 @@ node_modules
 dist
 *.tsbuildinfo
 
+# NOTE: assets/ is intentionally NOT ignored — committed runtime assets
+# (e.g. assets/roza-avatar.png) must ship inside the image.
+
 # Durable data and SQLite databases (mounted as a volume at runtime)
 data/*.sqlite
 data/*.sqlite-shm

@@ -78,6 +78,51 @@ export interface NewJournalEntry {
   createdAt?: string;
 }
 
+/** The two operative external channels Phase 2 persists rows for (Req 10, 11). */
+export type OperativeChannel = 'telegram' | 'email';
+
+/**
+ * A durable `inbound_queue` row (Req 10.2–10.4). Inbound messages received
+ * during Quiet_Hours are persisted here and drained FIFO — ordered by
+ * `received_at` then the monotonic `seq` tiebreak — on the first in-window tick.
+ */
+export interface InboundQueueRow {
+  id: string;
+  channel: OperativeChannel;
+  external_id: string;
+  sender_id: string;
+  text: string;
+  thread_ref: string | null;
+  received_at: string;
+  seq: number;
+}
+
+/**
+ * A `processed_messages` idempotency row keyed by `(channel, external_id)`
+ * (Req 11). `answer_state` is `answered_unsent` once a reply is generated and
+ * retained, transitioning to `answered_sent` after successful delivery; the
+ * `reply_text` is kept until the send succeeds so a failed send is retried
+ * without re-invoking the LLM (Req 11.5).
+ */
+export interface ProcessedRow {
+  channel: OperativeChannel;
+  external_id: string;
+  answer_state: 'answered_unsent' | 'answered_sent';
+  reply_text: string | null;
+  answered_at: string;
+  sent_at: string | null;
+}
+
+/** Input for {@link Repository.enqueueInbound} (Req 10.2). `id` and `seq` are assigned by the repository. */
+export interface NewInboundQueueRow {
+  channel: OperativeChannel;
+  external_id: string;
+  sender_id: string;
+  text: string;
+  thread_ref: string | null;
+  received_at: string;
+}
+
 /** Typed CRUD gateway used by the Cognitive Engine (design Component 4). */
 export interface Repository {
   // Human_Relationships (Req 6.1, 6.5, 6.6, 6.8, 7.3)
@@ -100,6 +145,25 @@ export interface Repository {
 
   // Task log (Req 2.5)
   recordTaskInvocation(at: string): void;
+
+  // Roza_Profile (Req 1.4, 2.2): single-row identity store
+  getProfile(): string | null;
+  upsertProfile(profileJson: string): void;
+
+  // Inbound queue (Req 10.2–10.4): durable defer store, drained FIFO
+  enqueueInbound(row: NewInboundQueueRow): void;
+  listInboundInOrder(): InboundQueueRow[];
+  deleteInbound(id: string): void;
+
+  // Idempotency / unsent-reply retention (Req 11.3, 11.5)
+  getProcessed(channel: OperativeChannel, externalId: string): ProcessedRow | null;
+  recordAnswered(
+    channel: OperativeChannel,
+    externalId: string,
+    replyText: string,
+    at: string
+  ): void;
+  markSent(channel: OperativeChannel, externalId: string, at: string): void;
 
   // Transactions
   tx<T>(fn: () => T): T;
@@ -182,6 +246,54 @@ export function createRepository(
 
   const insertTaskInvocation = db.prepare(
     'INSERT INTO task_invocations (id, invoked_at) VALUES (?, ?)'
+  );
+
+  // --- Phase 2 prepared statements (Req 1.4, 2.2, 10, 11) ----------------
+
+  const selectProfile = db.prepare(
+    'SELECT profile_json FROM roza_profile WHERE id = 1'
+  );
+  const upsertProfileStmt = db.prepare(
+    `INSERT INTO roza_profile (id, profile_json, updated_at)
+       VALUES (1, @profile_json, @updated_at)
+     ON CONFLICT(id) DO UPDATE SET
+       profile_json = excluded.profile_json,
+       updated_at   = excluded.updated_at`
+  );
+
+  const insertInbound = db.prepare(
+    `INSERT INTO inbound_queue
+       (id, channel, external_id, sender_id, text, thread_ref, received_at, seq)
+     VALUES
+       (@id, @channel, @external_id, @sender_id, @text, @thread_ref, @received_at, @seq)`
+  );
+  const selectNextInboundSeq = db.prepare(
+    'SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM inbound_queue'
+  );
+  const selectInboundInOrder = db.prepare(
+    'SELECT * FROM inbound_queue ORDER BY received_at, seq'
+  );
+  const deleteInboundStmt = db.prepare(
+    'DELETE FROM inbound_queue WHERE id = ?'
+  );
+
+  const selectProcessed = db.prepare(
+    'SELECT * FROM processed_messages WHERE channel = ? AND external_id = ?'
+  );
+  const insertAnswered = db.prepare(
+    `INSERT INTO processed_messages
+       (channel, external_id, answer_state, reply_text, answered_at, sent_at)
+     VALUES
+       (@channel, @external_id, 'answered_unsent', @reply_text, @answered_at, NULL)
+     ON CONFLICT(channel, external_id) DO UPDATE SET
+       reply_text  = excluded.reply_text,
+       answered_at = excluded.answered_at
+     WHERE processed_messages.answer_state = 'answered_unsent'`
+  );
+  const updateSent = db.prepare(
+    `UPDATE processed_messages
+        SET answer_state = 'answered_sent', sent_at = @sent_at
+      WHERE channel = @channel AND external_id = @external_id`
   );
 
   // --- Human_Relationships ----------------------------------------------
@@ -320,6 +432,87 @@ export function createRepository(
     insertTaskInvocation.run(randomUUID(), at);
   }
 
+  // --- Roza_Profile (Req 1.4, 2.2) ---------------------------------------
+
+  function getProfile(): string | null {
+    // Single-row store: the only profile lives at id = 1 (Req 1.4).
+    const row = selectProfile.get() as { profile_json: string } | undefined;
+    return row?.profile_json ?? null;
+  }
+
+  function upsertProfile(profileJson: string): void {
+    // Req 2.2: idempotent single-row upsert; the CHECK (id = 1) plus ON CONFLICT
+    // guarantees exactly one profile row that is overwritten in place.
+    upsertProfileStmt.run({
+      profile_json: profileJson,
+      updated_at: isoNow(),
+    });
+  }
+
+  // --- Inbound queue (Req 10.2–10.4) -------------------------------------
+
+  function enqueueInbound(row: NewInboundQueueRow): void {
+    // Assign a UUID and a monotonic seq inside a transaction so the
+    // MAX(seq)+1 read and the insert cannot interleave with another enqueue.
+    tx(() => {
+      const { next_seq } = selectNextInboundSeq.get() as { next_seq: number };
+      insertInbound.run({
+        id: randomUUID(),
+        channel: row.channel,
+        external_id: row.external_id,
+        sender_id: row.sender_id,
+        text: row.text,
+        thread_ref: row.thread_ref,
+        received_at: row.received_at,
+        seq: next_seq,
+      });
+    });
+  }
+
+  function listInboundInOrder(): InboundQueueRow[] {
+    // Req 10.3: FIFO by received_at then the seq tiebreak for identical instants.
+    return selectInboundInOrder.all() as InboundQueueRow[];
+  }
+
+  function deleteInbound(id: string): void {
+    // Drained rows are removed (inside the caller's tx) so a crash mid-drain
+    // leaves undrained rows intact (Req 10.4).
+    deleteInboundStmt.run(id);
+  }
+
+  // --- Idempotency / unsent-reply retention (Req 11) ---------------------
+
+  function getProcessed(
+    channel: OperativeChannel,
+    externalId: string
+  ): ProcessedRow | null {
+    const row = selectProcessed.get(channel, externalId) as ProcessedRow | undefined;
+    return row ?? null;
+  }
+
+  function recordAnswered(
+    channel: OperativeChannel,
+    externalId: string,
+    replyText: string,
+    at: string
+  ): void {
+    // Req 11.3, 11.5: record the generated reply as `answered_unsent`, retaining
+    // the text until it is sent. The ON CONFLICT update only refreshes an
+    // existing `answered_unsent` row; an already `answered_sent` row is never
+    // downgraded (the WHERE guard makes the upsert a no-op in that case).
+    insertAnswered.run({
+      channel,
+      external_id: externalId,
+      reply_text: replyText,
+      answered_at: at,
+    });
+  }
+
+  function markSent(channel: OperativeChannel, externalId: string, at: string): void {
+    // Req 11: flip to `answered_sent` once delivery succeeds, stamping sent_at.
+    updateSent.run({ channel, external_id: externalId, sent_at: at });
+  }
+
   // --- Transactions ------------------------------------------------------
 
   function tx<T>(fn: () => T): T {
@@ -340,6 +533,14 @@ export function createRepository(
     writeJournal,
     readJournal,
     recordTaskInvocation,
+    getProfile,
+    upsertProfile,
+    enqueueInbound,
+    listInboundInOrder,
+    deleteInbound,
+    getProcessed,
+    recordAnswered,
+    markSent,
     tx,
   };
 }

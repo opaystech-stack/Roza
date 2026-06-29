@@ -19,7 +19,8 @@
 import type { HumanRelationship, Message } from './types.js';
 import type { Lang, TaughtTerm } from './language.js';
 import type { ChatMessage } from './llm.js';
-import { SYSTEM_PROMPT } from './persona.js';
+import type { RozaProfile } from './profile.js';
+import { buildPersona } from './persona.js';
 
 /** Maximum recent messages injected into the prompt context (Req 6.2, 6.3). */
 export const MAX_PROMPT_MESSAGES = 20;
@@ -40,6 +41,8 @@ const LANGUAGE_LABEL: Record<Lang, string> = {
  * re-capped here.
  */
 export interface PromptContext {
+  /** The loaded Roza profile rendered into the persona System_Prompt (Req 3.1, 3.4, 3.5). */
+  profile: RozaProfile;
   /** The user's relational memory profile (Req 6.1, 6.3). */
   relationship: HumanRelationship;
   /** Recent conversation history, chronological (oldest first), up to 20 (Req 6.2, 6.3). */
@@ -108,7 +111,7 @@ function formatLanguageDirective(lang: Lang): string {
  */
 export function buildMessages(ctx: PromptContext, userMessage: string): ChatMessage[] {
   const systemContent = [
-    SYSTEM_PROMPT,
+    buildPersona(ctx.profile),
     formatRelationship(ctx.relationship),
     formatTaughtTerms(ctx.taughtTerms),
     formatHistory(ctx.recentMessages),

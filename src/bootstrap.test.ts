@@ -36,6 +36,14 @@ const FAKE_CONFIG: RozaConfig = {
   timezone: 'UTC',
   activeWindow: { startMinutes: 420, endMinutes: 1320 },
   keyVersion: 'v1',
+  // Phase 2 channels default to disabled (no credentials required).
+  telegram: { enabled: false, botToken: '', allowlist: [] },
+  mail: {
+    enabled: false,
+    imap: { host: '', port: 0, user: '', password: '' },
+    smtp: { host: '', port: 0, user: '', password: '' },
+    allowlist: [],
+  },
 };
 
 /** Build a fresh logger with spied methods. */

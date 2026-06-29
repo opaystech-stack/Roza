@@ -43,6 +43,13 @@ export interface SchedulerDeps {
   runAutonomousTask: () => Promise<void>;
   /** Records an autonomous task invocation with a timezone timestamp (Req 2.5). */
   recordInvocation: (at: string) => void;
+  /**
+   * Optional drain of the durable inbound queue, run on entry to the
+   * Active_Window before the autonomous task (Phase 2 — Req 10.3). When wired,
+   * the bootstrap binds it to `InboundRouter.drainQueue`. Omitting it preserves
+   * the exact Phase 1 tick behavior (backward compatible).
+   */
+  drainInboundQueue?: () => Promise<void>;
   /** Structured logger; never receives secret values. */
   logger: Logger;
 }
@@ -82,20 +89,37 @@ export function timestampInTimezone(date: Date, timezone: string): string {
  * 1. Gate on the Active_Window — outside it, return immediately (Quiet_Hours
  *    no-op, the right to disconnect).
  * 2. Record the invocation with a timezone-local timestamp (Req 2.5).
- * 3. Run the engine's autonomous task, swallowing and logging any failure so
+ * 3. Drain the durable inbound queue, if wired, so messages deferred during
+ *    Quiet_Hours are processed on entry to the Active_Window in receipt order
+ *    (Phase 2 — Req 10.3); a drain failure is isolated and logged so it neither
+ *    aborts the autonomous task nor crashes the tick (mirrors Req 2.6).
+ * 4. Run the engine's autonomous task, swallowing and logging any failure so
  *    the schedule continues at the next interval (Req 2.6).
  */
 export async function onTick(deps: SchedulerDeps): Promise<void> {
   const now = deps.now();
   const nowMinutes = minutesInTimezone(now, deps.timezone);
 
-  // Req 2.2: outside the Active_Window the scheduler does nothing.
+  // Req 2.2: outside the Active_Window the scheduler does nothing (no drain,
+  // no record, no task — deferral happens at ingress per Req 10.2).
   if (!isWithinActiveWindow(nowMinutes, deps.window)) {
     return;
   }
 
   // Req 2.5: every in-window invocation is recorded with a timezone timestamp.
   deps.recordInvocation(timestampInTimezone(now, deps.timezone));
+
+  // Req 10.3: on entry to the Active_Window, drain queued inbound messages
+  // before the autonomous task. Isolate failures like the task below so a drain
+  // error neither prevents runAutonomousTask nor crashes the tick.
+  if (deps.drainInboundQueue) {
+    try {
+      await deps.drainInboundQueue();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      deps.logger.error('inbound queue drain failed', { message });
+    }
+  }
 
   // Req 2.6: isolate task failures so subsequent ticks keep firing.
   try {
