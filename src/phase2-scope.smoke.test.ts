@@ -7,11 +7,18 @@
  *
  *   - Open-source deps (Req 13): the four Phase 2 runtime additions are the
  *     free/open set (grammy, imapflow, mailparser, nodemailer) and NO paid
- *     Telegram/email API SDK nor any excluded X/Twitter, voice, or avatar SDK
- *     appears in `package.json`.
+ *     Telegram/email API SDK nor any excluded paid X/Twitter API SDK, voice, or
+ *     avatar SDK appears in `package.json`.
  *   - Excluded-integration isolation (Req 15.2): no source module imports an
- *     excluded integration (ElevenLabs/Vapi/HeyGen/Tavus/Twitter/Playwright/
- *     Puppeteer) — these belong to FUTURE phases and must not be present now.
+ *     excluded integration (ElevenLabs/Vapi/HeyGen/Tavus or a paid X/Twitter
+ *     API SDK) — these belong to FUTURE phases or are genuinely excluded paid
+ *     SaaS and must not be present.
+ *
+ *     NOTE: X via browser automation (Playwright) is NOT excluded — Phase 5
+ *     legitimately implements X autonomy via browser automation under the
+ *     open-source-first rule (Playwright, Apache-2.0, NOT a paid Twitter API
+ *     SDK). Only the paid X/Twitter API client SDKs (twitter, twitter-api-v2,
+ *     twit, node-twitter) remain forbidden.
  *   - Recorded directions (Req 15.4, 15.5): the governing forward-looking
  *     technology directions (Playwright/Puppeteer for X; XTTS-v2/Coqui for
  *     voice; Wav2Lip/SadTalker for avatar/video) are recorded in the committed
@@ -101,15 +108,20 @@ const REQUIRED_OSS_DEPS = ['grammy', 'imapflow', 'mailparser', 'nodemailer'] as 
  * NOTE: browser automation (Playwright/Puppeteer) is intentionally NOT excluded.
  * Per the project's golden rule it is the APPROVED open-source approach over
  * paid APIs, and Phase 4 legitimately ships it (Google Meet avatar sessions via
- * `src/connectors/avatar/meetSession.ts`). The genuinely-excluded set remains
- * paid voice/avatar SaaS and X/Twitter client SDKs.
+ * `src/connectors/avatar/meetSession.ts`) and Phase 5 legitimately ships it for
+ * X autonomy via browser automation. The genuinely-excluded set remains paid
+ * voice/avatar SaaS and the paid X/Twitter API client SDKs (twitter,
+ * twitter-api-v2, twit, node-twitter).
  */
 const EXCLUDED_INTEGRATIONS: { label: string; pattern: RegExp }[] = [
   { label: 'ElevenLabs (voice)', pattern: /(^|[/@])elevenlabs/i },
   { label: 'Vapi (voice/telephony)', pattern: /(^|[/@])vapi/i },
   { label: 'HeyGen (avatar/video)', pattern: /(^|[/@])heygen/i },
   { label: 'Tavus (avatar/video)', pattern: /(^|[/@])tavus/i },
-  { label: 'X / Twitter SDK', pattern: /(^|[/@])(twitter|twit)($|[-/])/i },
+  {
+    label: 'paid X/Twitter API SDK',
+    pattern: /(^|[/@])(twitter|twitter-api-v2|twit($|[-/])|node-twitter)/i,
+  },
 ];
 
 interface PackageJson {
@@ -281,6 +293,16 @@ describe('Phase 2 scope — the voice channel is never operative (Req 15.3)', ()
         devices: { camera: '', microphone: '' },
         meet: { enabled: false, consent: false, account: '', password: '' },
         stream: { enabled: false, url: '', key: '' },
+      },
+      x: {
+        enabled: false,
+        credentials: { username: '', password: '' },
+        storageStatePath: '',
+        autonomyIntervalMinutes: 60,
+        rateLimit: { dailyPostLimit: 10, actionSpacingMs: 600000 },
+        maxTopics: 3,
+        maxPostChars: 280,
+        dryRun: false,
       },
     };
   }

@@ -50,6 +50,17 @@ export interface SchedulerDeps {
    * the exact Phase 1 tick behavior (backward compatible).
    */
   drainInboundQueue?: () => Promise<void>;
+  /**
+   * Optional autonomous X (Twitter) presence run, executed on the in-window
+   * tick after the autonomous task (Phase 5 — Req 4.1). The Active_Window gate
+   * in {@link onTick} already short-circuits during Quiet_Hours, so no X_Action
+   * ever occurs then (Req 4.3) — no separate gate is needed here. When wired,
+   * the bootstrap binds it to `XConnector.runXAutonomy`; its failures are
+   * isolated and logged like the autonomous task so a failure neither aborts
+   * the tick nor stops the cron (Req 4.5, 11.3). Omitting it preserves the
+   * exact prior tick behavior (Req 4.1, backward compatible).
+   */
+  runXAutonomy?: () => Promise<void>;
   /** Structured logger; never receives secret values. */
   logger: Logger;
 }
@@ -95,6 +106,10 @@ export function timestampInTimezone(date: Date, timezone: string): string {
  *    aborts the autonomous task nor crashes the tick (mirrors Req 2.6).
  * 4. Run the engine's autonomous task, swallowing and logging any failure so
  *    the schedule continues at the next interval (Req 2.6).
+ * 5. Run the optional X autonomy presence, if wired, after the autonomous task;
+ *    isolate failures like the task so an X failure neither aborts the tick nor
+ *    stops the cron (Phase 5 — Req 4.1, 4.5, 11.3). The Active_Window gate in
+ *    step 1 already prevents any X_Action during Quiet_Hours (Req 4.3).
  */
 export async function onTick(deps: SchedulerDeps): Promise<void> {
   const now = deps.now();
@@ -127,6 +142,20 @@ export async function onTick(deps: SchedulerDeps): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     deps.logger.error('autonomous task failed', { message });
+  }
+
+  // Req 4.1: after the autonomous task, run the optional X autonomy presence.
+  // The Active_Window gate above already prevents any X_Action during
+  // Quiet_Hours (Req 4.3), so no separate gate is needed. Isolate failures like
+  // the task above so an X failure neither aborts the tick nor stops the cron
+  // (Req 4.5, 11.3). Omitting the dep preserves the exact prior tick behavior.
+  if (deps.runXAutonomy) {
+    try {
+      await deps.runXAutonomy();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      deps.logger.error('X autonomy run failed', { message });
+    }
   }
 }
 

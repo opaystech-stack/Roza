@@ -252,10 +252,10 @@ function makeSpyLogger(): SpyLogger {
     infos,
     errors,
     info(message: string, meta?: Record<string, unknown>): void {
-      infos.push({ message, meta });
+      infos.push(meta === undefined ? { message } : { message, meta });
     },
     error(message: string, meta?: Record<string, unknown>): void {
-      errors.push({ message, meta });
+      errors.push(meta === undefined ? { message } : { message, meta });
     },
   };
 }
@@ -354,6 +354,16 @@ function makeEnabledConfig(opts: ConfigOptions = {}): RozaConfig {
       latency: { ttsMs: 5000, sttMs: 5000, endToEndMs: 8000, ringTimeoutMs: 30000 },
     },
     avatar,
+    x: {
+      enabled: false,
+      credentials: { username: '', password: '' },
+      storageStatePath: '',
+      autonomyIntervalMinutes: 60,
+      rateLimit: { dailyPostLimit: 10, actionSpacingMs: 600000 },
+      maxTopics: 3,
+      maxPostChars: 280,
+      dryRun: false,
+    },
   };
 }
 

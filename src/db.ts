@@ -101,6 +101,10 @@ const REQUIRED_TABLES: Record<string, readonly string[]> = {
   // Holds NO credential — no Meet_Credentials, no Stream_Key; `target` is only a
   // meet URL / RTMP ingest URL.
   avatar_sessions: ['id', 'kind', 'target', 'outcome', 'started_at', 'ended_at'],
+  // Phase 5 (Req 6.4, 8.2, 8.4, 10.1, 10.2, 10.3, 7.5): additive, audit-only X_Action log.
+  // Holds NO X_Credentials and NO X_Session_State content; only the action type,
+  // posted content, optional mention dedupe ref, and timestamp.
+  x_actions: ['id', 'action_type', 'content', 'mention_ref', 'created_at'],
 };
 
 /** Resolve the absolute path to the Roza_Mind_Database file under `dataDir`. */
@@ -114,11 +118,12 @@ export function resolveDbPath(dataDir: string): string {
  * `inbound_queue` (Req 10.2–10.4), and `processed_messages` (Req 11.1, 11.3,
  * 11.5) — and the additive Phase 3 `call_sessions` audit table (Req 4.6, 5.4,
  * 7.5, 9.1) and the additive Phase 4 `avatar_sessions` audit table (Req 6.6,
- * 7.4, 8.5, 9.1, 10.3) inside a single transaction so initialization is
- * all-or-none: if any statement fails, the whole batch rolls back and no
- * partial schema remains (Req 3.2). Every statement is an idempotent `CREATE
- * TABLE/INDEX IF NOT EXISTS`, so an existing Phase 1/2/3 database gains the
- * later tables without any destructive migration. The DDL carries the CHECK
+ * 7.4, 8.5, 9.1, 10.3) and the additive Phase 5 `x_actions` audit table (Req
+ * 6.4, 8.2, 8.4, 10.1, 10.2, 10.3, 7.5) inside a single transaction so
+ * initialization is all-or-none: if any statement fails, the whole batch rolls
+ * back and no partial schema remains (Req 3.2). Every statement is an idempotent
+ * `CREATE TABLE/INDEX IF NOT EXISTS`, so an existing Phase 1/2/3/4 database gains
+ * the later tables without any destructive migration. The DDL carries the CHECK
  * constraints, indexes, and the forward-compatible channel values from the
  * design.
  */
@@ -234,6 +239,20 @@ export function initSchema(db: Database.Database): void {
         ended_at    TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_avatar_kind_time ON avatar_sessions(kind, started_at DESC);
+
+      -- x_actions (Phase 5 — Req 6.4, 8.2, 8.4, 10.1, 10.2, 10.3, 7.5): additive, audit-only
+      -- X_Action log for the autonomous X / Twitter presence capability. Stores NO
+      -- X_Credentials and NO X_Session_State content; only the action type, the posted
+      -- content, an optional Mention dedupe ref, and the timestamp. Append-only.
+      CREATE TABLE IF NOT EXISTS x_actions (
+        id           TEXT PRIMARY KEY,
+        action_type  TEXT NOT NULL CHECK (action_type IN ('post','reply')),
+        content      TEXT NOT NULL,
+        mention_ref  TEXT,
+        created_at   TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_x_actions_time ON x_actions(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_x_actions_reply_ref ON x_actions(action_type, mention_ref);
     `);
   });
 

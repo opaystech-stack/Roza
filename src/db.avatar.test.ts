@@ -63,6 +63,21 @@ const AVATAR_SESSIONS_COLUMNS = [
 /** All ten tables a complete Phase 4 schema must contain. */
 const ALL_TABLES = [...PRIOR_PHASE_TABLES, 'avatar_sessions'];
 
+/**
+ * Tables legitimately added by later phases as purely additive schema. These
+ * are NOT required by a Phase 4 schema, but their presence must not trip this
+ * guard's "no unexpected/rogue tables" check:
+ *   - x_actions  (additive X (Twitter) autonomy audit table, roza-step5-x-twitter)
+ */
+const KNOWN_LATER_PHASE_TABLES = ['x_actions'] as const;
+
+/**
+ * Every table name this guard recognizes: the ten Phase 4 tables plus the known
+ * additive later-phase tables. Any live table outside this set is treated as an
+ * unexpected/rogue table and fails the guard.
+ */
+const KNOWN_TABLES = new Set<string>([...ALL_TABLES, ...KNOWN_LATER_PHASE_TABLES]);
+
 /** Track temp dirs created during a test so afterEach can clean them all up. */
 let tempDirs: string[] = [];
 
@@ -129,8 +144,11 @@ describe('db.avatar — additive avatar_sessions schema (Task 7.2, Req 8.5)', ()
       for (const table of ALL_TABLES) {
         expect(tables.has(table), `${table} should exist`).toBe(true);
       }
-      // Exactly the ten known tables — no more, no fewer.
-      expect(tables.size).toBe(ALL_TABLES.length);
+      // No unexpected/rogue tables: every live table must be a table this guard
+      // knows about (the ten Phase 4 tables, plus any purely additive
+      // later-phase tables such as x_actions). A truly unexpected table fails.
+      const unexpected = [...tables].filter((t) => !KNOWN_TABLES.has(t));
+      expect(unexpected, `no unexpected tables, found: ${unexpected.join(', ')}`).toEqual([]);
     } finally {
       db.close();
     }

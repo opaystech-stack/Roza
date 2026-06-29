@@ -55,6 +55,19 @@ const DEFAULT_AVATAR_PIXEL_FORMAT: AvatarPixelFormat = 'yuv420p';
 /** Default synthesis latency budget, in ms; on overrun → audio-only fallback (Phase 4, Req 2.7, 10.1, 10.3). */
 const DEFAULT_AVATAR_RENDER_LATENCY_MS = 4000;
 
+/** Default minutes between X autonomy runs on the Active_Window tick (Phase 5, Req 4.4). */
+const DEFAULT_X_AUTONOMY_INTERVAL_MINUTES = 60;
+/** Default Daily_Post_Limit cap on X_Actions per timezone-local day (Phase 5, Req 8.1, 8.2). */
+const DEFAULT_X_DAILY_POST_LIMIT = 10;
+/** Default minimum Action_Spacing between X_Actions, in ms (Phase 5, Req 8.1, 8.3) — 10 minutes. */
+const DEFAULT_X_ACTION_SPACING_MS = 600000;
+/** Default maximum Hot_Topics extracted per autonomy run (Phase 5, Req 4.2). */
+const DEFAULT_X_MAX_TOPICS = 3;
+/** Default maximum characters accepted by the X web interface (Phase 5, Req 5.5). */
+const DEFAULT_X_MAX_POST_CHARS = 280;
+/** Default basename of the durable X_Session_State file under the data directory (Phase 5, Req 3.1). */
+const DEFAULT_X_STORAGE_STATE_BASENAME = 'x_storage_state.json';
+
 /** Minutes in a single day; HH:MM values resolve to `[0, 1439]`. */
 const MINUTES_PER_DAY = 24 * 60;
 
@@ -188,6 +201,44 @@ export interface AvatarChannelConfig {
 }
 
 /**
+ * X (formerly Twitter) capability configuration (Phase 5, Req 1.1, 1.3, 4.4,
+ * 7.1–7.3, 8.1).
+ *
+ * `enabled` reflects `X_ENABLED` (default false). X is a configuration-gated
+ * presence/autonomy capability, NOT a conversation `Channel`. The
+ * `credentials` are the operator-provided env-only secrets `X_USERNAME` /
+ * `X_PASSWORD`, validated non-blank only WHEN `enabled`, and are NEVER logged
+ * or persisted (Req 7.1, 7.4, 7.5). The `storageStatePath` is non-secret
+ * configuration (its file CONTENTS are sensitive — Req 3.1, 3.4). The autonomy
+ * interval, rate-limit settings, max-topics, max-post-chars, and dry-run flag
+ * parse with documented defaults so an enabled capability always has a
+ * complete, tunable config (Req 8.1).
+ */
+export interface XChannelConfig {
+  /** X_ENABLED (default false) — Req 1.1. */
+  enabled: boolean;
+  /** X_Credentials — env-only secrets, validated non-blank only when `enabled`; NEVER logged/persisted (Req 7.1, 7.4, 7.5). */
+  credentials: { username: string; password: string };
+  /** Durable X_Session_State path (non-secret config; CONTENTS are sensitive — Req 3.1, 3.4). */
+  storageStatePath: string;
+  /** Minutes between X autonomy runs on the Active_Window tick (Req 4.4). */
+  autonomyIntervalMinutes: number;
+  /** Rate_Limit settings with documented defaults (Req 8.1). */
+  rateLimit: {
+    /** X_DAILY_POST_LIMIT (default 10) — Req 8.1, 8.2. */
+    dailyPostLimit: number;
+    /** X_ACTION_SPACING_MS (default 600000 = 10 min) — Req 8.1, 8.3. */
+    actionSpacingMs: number;
+  };
+  /** Max Hot_Topics extracted per run (Req 4.2). */
+  maxTopics: number;
+  /** Max characters accepted by the X web interface; overlong content is truncated/reformulated (Req 5.5). */
+  maxPostChars: number;
+  /** When true, formulate + audit but do NOT publish — a safe operator dry-run (documented default false). */
+  dryRun: boolean;
+}
+
+/**
  * Fully-resolved configuration consumed by the rest of the service. Required
  * secrets are guaranteed non-empty once this object exists.
  */
@@ -214,6 +265,8 @@ export interface RozaConfig {
   voice: VoiceChannelConfig;
   /** Avatar presence/output capability enablement, video/latency/renderer/device settings, and Meet/stream sub-capabilities (Phase 4). */
   avatar: AvatarChannelConfig;
+  /** X (formerly Twitter) presence/autonomy capability enablement, credentials, session-state path, and rate/topic/length settings (Phase 5). */
+  x: XChannelConfig;
 }
 
 /** The two required environment variables (Req 1.7). */
@@ -249,6 +302,14 @@ export type MissingVoiceVar = 'SIP_HOST' | 'SIP_PORT' | 'SIP_USER' | 'SIP_PASSWO
  * Reported by NAME only — the value is never surfaced (Req 8.4).
  */
 export type MissingAvatarVar = 'MEET_ACCOUNT' | 'MEET_PASSWORD' | 'STREAM_KEY';
+
+/**
+ * X_Credentials environment variables that are required only when the X
+ * capability is enabled (Phase 5, Req 7.2). `X_USERNAME`/`X_PASSWORD` are the
+ * operator-provided X account secrets. Reported by NAME only — the value is
+ * never surfaced (Req 7.4).
+ */
+export type MissingXVar = 'X_USERNAME' | 'X_PASSWORD';
 
 /** Structured configuration error; carries the offending name, never a value. */
 export type ConfigError = { kind: 'ENV_MISSING'; name: MissingVar };
@@ -649,6 +710,67 @@ export function resolveAvatarConfig(
 }
 
 /**
+ * Pure resolution of the X capability configuration (Phase 5, Req 1.1, 1.3,
+ * 4.4, 7.1–7.3, 8.1).
+ *
+ * Reads `X_ENABLED`. When the capability is DISABLED, the result is always
+ * `ok` with `enabled: false` and no error even if `X_USERNAME`/`X_PASSWORD`
+ * are absent — the capability stays inert and never aborts startup (Req 1.3,
+ * 7.3). When ENABLED, the storage-state path (default
+ * `${dataDir}/x_storage_state.json` under the durable volume — Req 3.1), the
+ * autonomy interval, the Daily_Post_Limit, the Action_Spacing, the max-topics,
+ * the max-post-chars, and the dry-run flag parse with documented defaults so an
+ * enabled capability always has a complete, tunable config (Req 4.4, 8.1).
+ *
+ * The X_Credentials are missing-checked ONLY when `X_ENABLED` is true:
+ * `X_USERNAME` and `X_PASSWORD` blank/whitespace/undefined are collected by
+ * NAME in a stable order (Req 7.2); their VALUES are never surfaced (Req 7.4).
+ * Mirrors `resolveAvatarConfig`/`resolveVoiceConfig` line-for-line. Total
+ * (never throws).
+ */
+export function resolveXConfig(
+  env: NodeJS.ProcessEnv,
+  dataDir: string
+): { ok: true; cfg: XChannelConfig } | { ok: false; missing: MissingXVar[] } {
+  const enabled = parseBoolFlag(env.X_ENABLED);
+
+  const cfg: XChannelConfig = {
+    enabled,
+    credentials: {
+      username: env.X_USERNAME?.trim() ?? '',
+      password: env.X_PASSWORD ?? '',
+    },
+    storageStatePath:
+      env.X_STORAGE_STATE_PATH?.trim() || `${dataDir}/${DEFAULT_X_STORAGE_STATE_BASENAME}`,
+    autonomyIntervalMinutes: parsePositiveIntOr(
+      env.X_AUTONOMY_INTERVAL_MINUTES,
+      DEFAULT_X_AUTONOMY_INTERVAL_MINUTES
+    ),
+    rateLimit: {
+      dailyPostLimit: parsePositiveIntOr(env.X_DAILY_POST_LIMIT, DEFAULT_X_DAILY_POST_LIMIT),
+      actionSpacingMs: parsePositiveIntOr(env.X_ACTION_SPACING_MS, DEFAULT_X_ACTION_SPACING_MS),
+    },
+    maxTopics: parsePositiveIntOr(env.X_MAX_TOPICS, DEFAULT_X_MAX_TOPICS),
+    maxPostChars: parsePositiveIntOr(env.X_MAX_POST_CHARS, DEFAULT_X_MAX_POST_CHARS),
+    dryRun: parseBoolFlag(env.X_DRY_RUN),
+  };
+
+  if (!enabled) {
+    return { ok: true, cfg };
+  }
+
+  const missing: MissingXVar[] = [];
+  if (isBlank(env.X_USERNAME)) missing.push('X_USERNAME');
+  if (isBlank(env.X_PASSWORD)) missing.push('X_PASSWORD');
+
+  if (missing.length > 0) {
+    return { ok: false, missing };
+  }
+
+  return { ok: true, cfg };
+}
+
+/**
  * Imperative startup wrapper (Req 1.7, 2.4, 5.2).
  *
  * Validates required secrets; on failure it logs the variable NAME only (never
@@ -672,6 +794,12 @@ export function resolveAvatarConfig(
  * missing, or the stream sub-capability is enabled and `STREAM_KEY` is missing,
  * each is logged by NAME (never the value) and `process.exit(1)`; a disabled
  * avatar capability stays inert.
+ *
+ * Phase 5 (Req 7.2, 7.3): the X capability follows the identical contract.
+ * When `X_ENABLED` is true and `X_USERNAME`/`X_PASSWORD` are missing, each is
+ * logged by NAME (never the value) and `process.exit(1)`; a disabled X
+ * capability stays inert. `resolveXConfig` receives the resolved `dataDir` so
+ * the X_Session_State path defaults under the durable volume (Req 3.1).
  */
 export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
   const required = validateRequiredEnv(env);
@@ -693,17 +821,24 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
   // Phase 2: resolve channel enablement + credentials. Only ENABLED channels
   // with missing credentials abort startup; disabled channels stay inert.
   // Phase 3: the voice channel follows the identical fail-fast contract.
+  // Resolve the durable data directory once: `resolveXConfig` needs it for the
+  // default X_Session_State path, and it is reused in the returned config.
+  const dataDir = env.ROZA_DATA_DIR?.trim() || env.DATA_DIR?.trim() || DEFAULT_DATA_DIR;
   const telegram = resolveTelegramConfig(env);
   const mail = resolveMailConfig(env);
   const voice = resolveVoiceConfig(env);
   const avatar = resolveAvatarConfig(env);
-  if (!telegram.ok || !mail.ok || !voice.ok || !avatar.ok) {
-    const channelMissing: (MissingChannelVar | MissingVoiceVar | MissingAvatarVar)[] = [
-      ...(telegram.ok ? [] : telegram.missing),
-      ...(mail.ok ? [] : mail.missing),
-      ...(voice.ok ? [] : voice.missing),
-      ...(avatar.ok ? [] : avatar.missing),
-    ];
+  // Phase 5: the X capability follows the identical fail-fast contract.
+  const x = resolveXConfig(env, dataDir);
+  if (!telegram.ok || !mail.ok || !voice.ok || !avatar.ok || !x.ok) {
+    const channelMissing: (MissingChannelVar | MissingVoiceVar | MissingAvatarVar | MissingXVar)[] =
+      [
+        ...(telegram.ok ? [] : telegram.missing),
+        ...(mail.ok ? [] : mail.missing),
+        ...(voice.ok ? [] : voice.missing),
+        ...(avatar.ok ? [] : avatar.missing),
+        ...(x.ok ? [] : x.missing),
+      ];
     for (const name of channelMissing) {
       console.error(
         `[config] Startup aborted: required environment variable ${name} is missing or empty.`
@@ -719,7 +854,7 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
     openRouterModel: env.OPENROUTER_MODEL?.trim() || DEFAULT_MODEL,
     // Prefer the documented ROZA_-prefixed names; fall back to the unprefixed
     // legacy names for resilience (see .env.example / docker-compose.yml).
-    dataDir: env.ROZA_DATA_DIR?.trim() || env.DATA_DIR?.trim() || DEFAULT_DATA_DIR,
+    dataDir,
     timezone: env.ROZA_TIMEZONE?.trim() || env.TIMEZONE?.trim() || DEFAULT_TIMEZONE,
     activeWindow: window,
     keyVersion: env.ROZA_KEY_VERSION?.trim() || env.KEY_VERSION?.trim() || DEFAULT_KEY_VERSION,
@@ -730,5 +865,7 @@ export function loadConfigOrExit(env: NodeJS.ProcessEnv): RozaConfig {
     voice: voice.cfg,
     // Phase 4: `avatar` is `ok` here (the guard above exits otherwise).
     avatar: avatar.cfg,
+    // Phase 5: `x` is `ok` here (the guard above exits otherwise).
+    x: x.cfg,
   };
 }

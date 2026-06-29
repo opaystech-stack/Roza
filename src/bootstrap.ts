@@ -82,6 +82,8 @@ import { createV4l2VirtualCamera } from './connectors/avatar/virtualCamera.js';
 import { createPipeWireVirtualMicrophone } from './connectors/avatar/virtualMicrophone.js';
 import { createPlaywrightMeetSession } from './connectors/avatar/meetSession.js';
 import { createFfmpegStreamSession } from './connectors/avatar/streamSession.js';
+import { createXConnector, type XConnector } from './connectors/x/xConnector.js';
+import { createPlaywrightXSession } from './connectors/x/xSession.js';
 import type { AudioChunk } from './connectors/voice/audio.js';
 import type { Logger } from './types.js';
 
@@ -133,6 +135,20 @@ export interface RozaHandle {
    * is disabled (`exactOptionalPropertyTypes`), mirroring `voice`.
    */
   avatar?: AvatarConnector;
+  /**
+   * The X_Connector — present ONLY when the X capability is enabled and the
+   * connector was constructed (Phase 5). Like {@link voice} and {@link avatar},
+   * X is a presence/autonomy capability, NOT a conversation `Channel` (the
+   * `Channel` union and `connectors` Map are untouched — Req 1.5), so it lives
+   * outside the `connectors` Map. The constructed connector is included in the
+   * handle once built; its fire-and-forget `start()` is fault-isolated, so a
+   * later async startup rejection is logged and the X capability skipped without
+   * removing it from the handle (Req 11.3). The property is OMITTED entirely
+   * when the capability is disabled (`exactOptionalPropertyTypes`), mirroring
+   * `avatar`, so the disabled-path handle is byte-for-byte the Phase 4 shape
+   * (Req 1.3, 1.6).
+   */
+  x?: XConnector;
   /** Mutable profile holder enabling restart-free profile edits (Req 2.4). */
   profileHolder: ProfileHolder;
 }
@@ -179,6 +195,10 @@ export interface BootstrapDeps {
   createMeetSession?: typeof createPlaywrightMeetSession;
   /** Build the ffmpeg/RTMP StreamSession (real ffmpeg publisher by default). Default {@link createFfmpegStreamSession}. */
   createStreamSession?: typeof createFfmpegStreamSession;
+  /** Build the X_Connector (real injected XSession by default). Default {@link createXConnector}. */
+  createX?: typeof createXConnector;
+  /** Build the Playwright X session adapter (real headless Chromium by default). Default {@link createPlaywrightXSession}. */
+  createXSession?: typeof createPlaywrightXSession;
   /** Register the 30-minute cron scheduler. Default {@link initScheduler}. */
   initScheduler?: typeof initScheduler;
   /** OpenRouter chat-completion client passed to the engine. Default {@link chatCompletion}. */
@@ -333,6 +353,40 @@ function startAvatarIsolated(avatar: AvatarConnector, logger: Logger): void {
 }
 
 /**
+ * Start the X_Connector with fault isolation (Req 11.3).
+ *
+ * The X_Connector is NOT a {@link ChannelConnector} (X is a presence/autonomy
+ * capability, not a conversation `Channel`, so it does not live in the
+ * `connectors` Map), so it needs its own isolation helper that MIRRORS
+ * {@link startAvatarIsolated} exactly. Its `start` is lightweight (the browser
+ * session is opened lazily inside `runXAutonomy`) but may still throw
+ * synchronously or reject asynchronously. Both are isolated: the failure is
+ * logged via `logger.error` (never a credential or session-state value —
+ * Req 7.4) and the X capability is skipped, while the scheduler, the text
+ * connectors, the voice channel, the avatar capability, and the always-on
+ * `internal` channel all keep running. `start` itself stays synchronous, so the
+ * rejection path is handled with a `.catch` rather than `await`.
+ */
+function startXIsolated(x: XConnector, logger: Logger): void {
+  const onFailure = (err: unknown): void => {
+    logger.error('[x] startup failed; capability skipped (fault-isolated)', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  };
+
+  try {
+    const started = x.start();
+    // Isolate an asynchronous rejection without blocking the synchronous start().
+    if (started !== undefined && typeof started.then === 'function') {
+      started.catch(onFailure);
+    }
+  } catch (err) {
+    // Isolate a synchronous throw from the X connector's start.
+    onFailure(err);
+  }
+}
+
+/**
  * Run the fail-fast startup sequence and enter the operational state.
  *
  * Ordering (Req 1.3, 1.2): configuration → database → repository → profile →
@@ -373,6 +427,8 @@ export function start(
   const createVirtualMicrophone = deps.createVirtualMicrophone ?? createPipeWireVirtualMicrophone;
   const createMeetSession = deps.createMeetSession ?? createPlaywrightMeetSession;
   const createStreamSession = deps.createStreamSession ?? createFfmpegStreamSession;
+  const createX = deps.createX ?? createXConnector;
+  const createXSession = deps.createXSession ?? createPlaywrightXSession;
   const initSched = deps.initScheduler ?? initScheduler;
   const llm = deps.llm ?? chatCompletion;
   const logger = deps.logger ?? defaultLogger;
@@ -471,6 +527,15 @@ export function start(
   //    entry to the Active_Window in receipt order (Req 10.3). A failure here is
   //    the one remaining startup fault to guard: emit a component-named error
   //    log and exit non-zero, executing no autonomous task (Req 1.5).
+  //
+  //    Phase 5: when the X capability is enabled, the X autonomy run is wired in
+  //    via the scheduler's optional `runXAutonomy` dep (Req 4.1). The X_Connector
+  //    is constructed AFTER the avatar (step 10d), but the dep is only INVOKED on
+  //    an in-window tick — long after `start()` returns — so a closure over the
+  //    mutable `x` holder declared here is safe. The dep is OMITTED entirely when
+  //    X is disabled, keeping the disabled-path scheduler wiring byte-for-byte the
+  //    Phase 4 shape (no autonomy wiring constructed — Req 1.3, 1.6).
+  let x: XConnector | undefined;
   let scheduler: ScheduledTask;
   try {
     scheduler = initSched({
@@ -482,6 +547,9 @@ export function start(
         repo.recordTaskInvocation(at);
       },
       drainInboundQueue: () => router.drainQueue(),
+      ...(cfg.x.enabled
+        ? { runXAutonomy: (): Promise<void> => (x ? x.runXAutonomy() : Promise.resolve()) }
+        : {}),
       logger,
     });
   } catch (err) {
@@ -631,6 +699,43 @@ export function start(
     startAvatarIsolated(avatar, logger);
   }
 
+  // 10d. X capability (Phase 5) — built and started ONLY when enabled, AFTER the
+  //      avatar connector. With X_ENABLED=false NOTHING below runs, so startup is
+  //      byte-for-byte the Phase 4 sequence (no XSession, browser, or autonomy
+  //      wiring constructed — Req 1.3, 1.6). When enabled, the Playwright X
+  //      session adapter is constructed over the durable X_Session_State path
+  //      (`cfg.x.storageStatePath`); the X_Credentials are NOT passed to the
+  //      adapter factory — the connector hands them only to `session.login`, and
+  //      they are never logged (Req 7.4). The session is injected with `repo`, the
+  //      live `profile` accessor, the `llm` client, `now`, and `timezone` into the
+  //      X_Connector, whose `runXAutonomy` is driven from the Scheduler's in-window
+  //      tick (wired via the scheduler's `runXAutonomy` dep at step 9 — Req 4.1).
+  //      The connector is then started FAULT-ISOLATED via `startXIsolated`
+  //      (Req 11.3): a synchronous throw or an async rejection on `x.start()` is
+  //      logged and the X capability skipped, never aborting internal/telegram/
+  //      email/voice/avatar or the scheduler. `start()` stays synchronous and the
+  //      X `start()` is fire-and-forget. The constructed connector is assigned to
+  //      the `x` holder the scheduler closure reads.
+  if (cfg.x.enabled) {
+    // The Playwright X session adapter (the storage-state path is non-secret
+    // config; its file CONTENTS are sensitive and never logged — Req 3.4, 7.4).
+    const session = createXSession({
+      storageStatePath: cfg.x.storageStatePath,
+      logger,
+    });
+    x = createX({
+      session,
+      cfg,
+      profile: () => profileHolder.current,
+      llm,
+      repo,
+      now,
+      timezone: cfg.timezone,
+      logger,
+    });
+    startXIsolated(x, logger);
+  }
+
   // 11. Operational state — emit the startup-ready entry (Req 1.4).
   logger.info('[roza] roza-agent ready');
 
@@ -646,6 +751,12 @@ export function start(
   // byte the Phase 3 shape; it is present only when built+started.
   if (avatar !== undefined) {
     handle.avatar = avatar;
+  }
+  // The `x` property is likewise OMITTED when the capability is disabled
+  // (`exactOptionalPropertyTypes`), keeping the disabled-path handle byte-for-
+  // byte the Phase 4 shape; it is present only when built+started.
+  if (x !== undefined) {
+    handle.x = x;
   }
   return handle;
 }

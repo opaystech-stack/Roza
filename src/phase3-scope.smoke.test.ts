@@ -18,15 +18,16 @@
  *     Public Model License.
  *   - Scope boundary (Req 13.1, 13.2): no source module imports an excluded
  *     integration — no video/avatar (Wav2Lip/SadTalker/HeyGen/Tavus) and no
- *     X/Twitter client SDK. `voice` IS now operative; video/avatar and X are
- *     NOT.
+ *     paid X/Twitter API client SDK. `voice` IS now operative; video/avatar is
+ *     NOT. X via browser automation (Playwright) is legitimately implemented in
+ *     Phase 5 and is NOT excluded — only paid X/Twitter API SDKs are.
  *   - Operative channels (Req 13.1): `engine.ts` makes `voice` operative
  *     (`channels.add('voice')`), and the only channels ever added to the
  *     operative set are `internal`/`telegram`/`email`/`voice`.
  *   - Forward-looking directions (Req 13.3, 13.4): video/avatar (Wav2Lip/
- *     SadTalker) and X via browser automation are FUTURE — recorded in the
- *     spec docs, not implemented. A light check confirms no such dependency
- *     exists in `package.json`.
+ *     SadTalker) is FUTURE — recorded in the spec docs, not implemented. X via
+ *     browser automation has since been delivered in Phase 5; this test still
+ *     confirms no paid X/Twitter API SDK dependency exists in `package.json`.
  *
  * The import scan inspects *import specifiers* (not raw text), reusing the
  * approach from `isolation.smoke.test.ts`/`phase2-scope.smoke.test.ts`, so a
@@ -126,16 +127,23 @@ const PAID_VOICE_TELEPHONY_SDKS: { label: string; pattern: RegExp }[] = [
 ];
 
 /**
- * Excluded video/avatar + X/Twitter integrations that belong to FUTURE phases
- * (Req 13.1, 13.2, 13.3, 13.4). Matched against dependency names and external
- * import specifiers.
+ * Excluded video/avatar + paid X/Twitter API integrations (Req 13.1, 13.2,
+ * 13.3, 13.4). Matched against dependency names and external import specifiers.
+ *
+ * NOTE: X via browser automation (Playwright) is NOT excluded — Phase 5
+ * legitimately implements X autonomy via browser automation under the
+ * open-source-first rule. Only the paid X/Twitter API client SDKs (twitter,
+ * twitter-api-v2, twit, node-twitter) remain forbidden.
  */
 const EXCLUDED_INTEGRATIONS: { label: string; pattern: RegExp }[] = [
   { label: 'Wav2Lip (video/avatar)', pattern: /(^|[/@])wav2lip/i },
   { label: 'SadTalker (video/avatar)', pattern: /(^|[/@])sadtalker/i },
   { label: 'HeyGen (avatar/video)', pattern: /(^|[/@])heygen/i },
   { label: 'Tavus (avatar/video)', pattern: /(^|[/@])tavus/i },
-  { label: 'X / Twitter SDK', pattern: /(^|[/@])(twitter|twit)($|[-/])/i },
+  {
+    label: 'paid X/Twitter API SDK',
+    pattern: /(^|[/@])(twitter|twitter-api-v2|twit($|[-/])|node-twitter)/i,
+  },
 ];
 
 describe('Phase 3 scope — open-source telephony dependency (Req 6.1, 6.3, 12.3, 3.5)', () => {

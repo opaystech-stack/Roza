@@ -203,6 +203,41 @@ export interface AvatarSession {
   ended_at: string | null;
 }
 
+/**
+ * Kind of an X_Action recorded in the additive `x_actions` audit log (Phase 5 —
+ * Req 6.4, 8.4, 10.1): an original Roza_Post or a contextual Reply.
+ */
+export type XActionType = 'post' | 'reply';
+
+/**
+ * An `x_actions` audit row (Phase 5 — Req 6.4, 8.2, 8.4, 10.1–10.3). This is an
+ * additive, audit-only log of Roza's published X_Actions that also backs the
+ * per-day Rate_Limit count and the reply dedupe set. It stores NO X_Credentials
+ * and NO X_Session_State content (Req 7.5, 10.3): the only X-derived values it
+ * holds are the published content Roza authored and, for replies, the public
+ * Mention `mention_ref` (NULL for posts).
+ */
+export interface XActionRow {
+  id: string;
+  action_type: XActionType;
+  content: string;
+  mention_ref: string | null;
+  created_at: string;
+}
+
+/**
+ * Input for {@link Repository.recordXAction} (Phase 5 — Req 8.4, 10.1). The `id`
+ * is assigned by the repository. `mentionRef` is the public Mention ref for a
+ * reply and is omitted/`null` for a post. Carries NO credential and NO
+ * X_Session_State content (Req 7.5, 10.3).
+ */
+export interface NewXAction {
+  actionType: XActionType;
+  content: string;
+  mentionRef?: string | null;
+  createdAt: string;
+}
+
 /** Typed CRUD gateway used by the Cognitive Engine (design Component 4). */
 export interface Repository {
   // Human_Relationships (Req 6.1, 6.5, 6.6, 6.8, 7.3)
@@ -258,6 +293,14 @@ export interface Repository {
   // / RTMP ingest URL.
   startAvatarSession(kind: AvatarSessionKind, target?: string | null): AvatarSession;
   endAvatarSession(id: string, outcome: AvatarOutcome, at: string): void;
+
+  // X_Action audit log (Phase 5 — Req 6.4, 8.2, 8.4, 10.1–10.3): additive,
+  // audit-only; also backs the per-day Rate_Limit count and the reply-dedupe
+  // set. Stores NO credential and NO X_Session_State content; append-only —
+  // prior rows are never modified or deleted (Req 10.2).
+  recordXAction(input: NewXAction): XActionRow;
+  listXActionsSince(sinceIso: string): XActionRow[];
+  listRepliedMentionRefs(): string[];
 
   // Transactions
   tx<T>(fn: () => T): T;
@@ -421,6 +464,25 @@ export function createRepository(
   );
   const updateAvatarSessionEnd = db.prepare(
     'UPDATE avatar_sessions SET outcome = @outcome, ended_at = @ended_at WHERE id = @id'
+  );
+
+  // --- Phase 5 prepared statements (Req 6.4, 8.2, 8.4, 10.1–10.3) --------
+
+  const insertXAction = db.prepare(
+    `INSERT INTO x_actions
+       (id, action_type, content, mention_ref, created_at)
+     VALUES
+       (@id, @action_type, @content, @mention_ref, @created_at)`
+  );
+  const selectXActionById = db.prepare('SELECT * FROM x_actions WHERE id = ?');
+  const selectXActionsSince = db.prepare(
+    `SELECT * FROM x_actions
+       WHERE created_at >= ?
+       ORDER BY created_at DESC, id DESC`
+  );
+  const selectRepliedMentionRefs = db.prepare(
+    `SELECT DISTINCT mention_ref FROM x_actions
+       WHERE action_type = 'reply' AND mention_ref IS NOT NULL`
   );
 
   // --- Human_Relationships ----------------------------------------------
@@ -703,6 +765,40 @@ export function createRepository(
     });
   }
 
+  // --- X_Action audit log (Phase 5 — Req 6.4, 8.2, 8.4, 10.1–10.3) -------
+
+  function recordXAction(input: NewXAction): XActionRow {
+    // Req 8.4, 10.1: append exactly one audit row per published X_Action with a
+    // fresh UUID. `mention_ref` is the public Mention ref for a reply and NULL
+    // for a post — never a credential or X_Session_State content (Req 7.5,
+    // 10.3). Append-only: prior rows are never modified or deleted (Req 10.2).
+    // Wrapped in the Phase 1 `tx` so the insert and read-back are atomic.
+    return tx(() => {
+      const id = randomUUID();
+      insertXAction.run({
+        id,
+        action_type: input.actionType,
+        content: input.content,
+        mention_ref: input.mentionRef ?? null,
+        created_at: input.createdAt,
+      });
+      return selectXActionById.get(id) as XActionRow;
+    });
+  }
+
+  function listXActionsSince(sinceIso: string): XActionRow[] {
+    // Req 8.2, 8.4: rows whose created_at is at or after `sinceIso`, the source
+    // for the per-day Rate_Limit count. Read-only; never mutates prior rows.
+    return selectXActionsSince.all(sinceIso) as XActionRow[];
+  }
+
+  function listRepliedMentionRefs(): string[] {
+    // Req 6.4: the distinct, non-null set of Mention refs Roza has already
+    // replied to, so the reply loop never replies twice to the same Mention.
+    const rows = selectRepliedMentionRefs.all() as Array<{ mention_ref: string }>;
+    return rows.map((row) => row.mention_ref);
+  }
+
   // --- Transactions ------------------------------------------------------
 
   function tx<T>(fn: () => T): T {
@@ -737,6 +833,9 @@ export function createRepository(
     getCallSession,
     startAvatarSession,
     endAvatarSession,
+    recordXAction,
+    listXActionsSince,
+    listRepliedMentionRefs,
     tx,
   };
 }

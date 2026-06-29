@@ -114,6 +114,16 @@ function makeConfig(overrides?: Partial<RozaConfig>): RozaConfig {
       meet: { enabled: false, consent: false, account: '', password: '' },
       stream: { enabled: false, url: '', key: '' },
     },
+    x: {
+      enabled: false,
+      credentials: { username: '', password: '' },
+      storageStatePath: '',
+      autonomyIntervalMinutes: 60,
+      rateLimit: { dailyPostLimit: 10, actionSpacingMs: 600000 },
+      maxTopics: 3,
+      maxPostChars: 280,
+      dryRun: false,
+    },
     ...overrides,
   };
 }

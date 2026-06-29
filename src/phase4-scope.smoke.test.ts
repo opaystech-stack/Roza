@@ -23,9 +23,12 @@
  *     union — the operative set stays exactly `internal`/`telegram`/`email`/
  *     `voice`, and the avatar is modeled as a presence capability via
  *     `decideAvatar`, not a `Channel`.
- *   - Forward-looking direction (Req 11.2, 11.3): X/Twitter via browser
- *     automation is RECORDED in the spec docs and ABSENT from Phase 4 — no
- *     Twitter/X dependency or module is present.
+ *   - X capability scope (Req 11.1, and Phase 5 Req 1.5, 2.1, 2.2, 12.1, 12.2):
+ *     no paid X/Twitter API SDK (twitter/twitter-api-v2/twit/node-twitter) is
+ *     declared or imported. X via browser automation (Playwright) is a
+ *     legitimate capability — delivered in Phase 5 under the open-source-first
+ *     rule — so this suite NO LONGER asserts the X capability or Playwright is
+ *     absent; it only forbids the genuinely-excluded paid X/Twitter API SDKs.
  *
  * The import scan inspects *import specifiers* (not raw text), reusing the
  * approach from `isolation.smoke.test.ts` / `phase3-scope.smoke.test.ts`, so a
@@ -261,6 +264,16 @@ describe('Phase 4 scope — the avatar adds no member to the Channel union (Req 
         meet: { enabled: overrides.meet, consent: false, account: '', password: '' },
         stream: { enabled: overrides.stream, url: '', key: '' },
       },
+      x: {
+        enabled: false,
+        credentials: { username: '', password: '' },
+        storageStatePath: '',
+        autonomyIntervalMinutes: 60,
+        rateLimit: { dailyPostLimit: 10, actionSpacingMs: 600000 },
+        maxTopics: 3,
+        maxPostChars: 280,
+        dryRun: false,
+      },
     };
   }
 
@@ -315,25 +328,30 @@ describe('Phase 4 scope — the avatar adds no member to the Channel union (Req 
   });
 });
 
-describe('Phase 4 scope — X/Twitter via browser automation is recorded but ABSENT (Req 11.2, 11.3)', () => {
+describe('Phase 4 scope — paid X/Twitter API SDK absent; X via browser automation now legitimately implemented in Phase 5 (Req 11.1; Phase 5 Req 1.5, 2.1, 2.2, 12.1, 12.2)', () => {
   const pkg = readPackageJson();
   const allDepNames = [
     ...Object.keys(pkg.dependencies ?? {}),
     ...Object.keys(pkg.devDependencies ?? {}),
   ];
 
-  /** X/Twitter client / browser-automation-for-Twitter packages (a FUTURE direction). */
-  const TWITTER_DEPS = /(^|[/@])(twitter|twitter-api|puppeteer-twitter|twit($|[-/]))/i;
+  /**
+   * The genuinely-excluded PAID X/Twitter API client SDKs. Browser automation
+   * (Playwright/Puppeteer) is NOT excluded — it is the approved open-source
+   * approach, and Phase 5 legitimately ships X autonomy via browser automation
+   * (`src/connectors/x/`). Only the paid X/Twitter API SDKs remain forbidden.
+   */
+  const PAID_TWITTER_SDKS = /(^|[/@])(twitter|twitter-api-v2|twit($|[-/])|node-twitter)/i;
 
-  it('declares no X/Twitter dependency — the forward direction is not implemented in Phase 4', () => {
-    const violations = allDepNames.filter((name) => TWITTER_DEPS.test(name));
+  it('declares no paid X/Twitter API SDK dependency — X uses browser automation, not a paid API', () => {
+    const violations = allDepNames.filter((name) => PAID_TWITTER_SDKS.test(name));
     expect(
       violations,
-      `X/Twitter is a FUTURE direction and must not be a Phase 4 dependency: ${violations.join(', ')}`,
+      `paid X/Twitter API SDK must not be a dependency (X uses browser automation): ${violations.join(', ')}`,
     ).toEqual([]);
   });
 
-  it('no source module references an X/Twitter integration', () => {
+  it('no source module imports a paid X/Twitter API SDK', () => {
     const sourceFiles = collectSourceFiles(SRC_DIR);
     expect(sourceFiles.length, `no .ts source files found under ${SRC_DIR}`).toBeGreaterThan(0);
 
@@ -343,19 +361,19 @@ describe('Phase 4 scope — X/Twitter via browser automation is recorded but ABS
       const rel = path.relative(SERVICE_ROOT, file);
       for (const spec of importSpecifiers(content)) {
         if (!isExternalPackage(spec)) continue;
-        if (TWITTER_DEPS.test(spec)) {
-          violations.push(`${rel}: imports excluded X/Twitter integration via '${spec}'`);
+        if (PAID_TWITTER_SDKS.test(spec)) {
+          violations.push(`${rel}: imports excluded paid X/Twitter API SDK via '${spec}'`);
         }
       }
     }
 
     expect(
       violations,
-      `Phase 4 scope breach — X/Twitter integration import found:\n${violations.join('\n')}`,
+      `scope breach — paid X/Twitter API SDK import found:\n${violations.join('\n')}`,
     ).toEqual([]);
   });
 
-  it('records the X/Twitter-via-browser-automation forward direction in the committed spec docs', () => {
+  it('records the X-via-browser-automation direction in the committed spec docs', () => {
     // The direction lives in the SIBLING spec repo's design.md; fall back to the
     // requirements.md and any service-local docs. It passes as long as the
     // direction is recorded in at least one reachable committed document.
@@ -380,7 +398,7 @@ describe('Phase 4 scope — X/Twitter via browser automation is recorded but ABS
     expect(sources.length, 'no committed spec/service documentation found to scan').toBeGreaterThan(0);
     expect(
       /(twitter|\bx\b)/i.test(text) && /browser automation/i.test(text),
-      `expected an X/Twitter-via-browser-automation forward direction recorded in: ${sources.join(', ')}`,
+      `expected an X-via-browser-automation direction recorded in: ${sources.join(', ')}`,
     ).toBe(true);
   });
 });
